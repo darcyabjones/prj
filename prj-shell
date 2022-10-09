@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+
+# vi: ft=bash
+set -euo pipefail
+
+CMD=$(prj-private-cli.py "$(basename $0)" "$@" <<EOF
+short="-b", long="--base", dest="BASE", type="str", default=".", help="Which base directory to use"
+short="-n", long="--no-echo", dest="NOECHO", type="FLAG", default=False, help="Suppress stdout/stderr."
+short="-o", long="--outfile", dest="OUTFILE", type="str", default="", help="Where to write the logs. Note this will always append to existing files."
+short="-m", long="--message", dest="MESSAGE", type="str", default="", help="A message to write."
+dest="SHELL", type="str", default=["bash"], nargs="?", help="What interactive command to run."
+EOF
+)
+
+
+if ! (echo "${CMD}" | grep '^### prj-private-cli output$' > /dev/null)
+then
+    # help or an error occurred
+    echo "# $(basename $0)"
+    echo "${CMD}"
+    echo -e "\nNOTE: some shells (e.g. python) don't display anything if you use the --no-echo flag."
+    exit 0
+fi
+
+eval "${CMD}"
+SHELL="${SHELL[@]}"
+
+BASE="$(prj-private-findbase.sh ${BASE})"
+
+source "${BASE}/.prj"
+DATE=$(date '+%Y%m%d-%H%M%S')
+
+# NOTEFILE is set in .bkp
+[ -z "${OUTFILE:-}" ] && OUTFILE="${NOTEFILE}"
+
+NOECHO_FLAG=""
+if [ "${NOECHO}" == "True" ]
+then
+    NOECHO_FLAG="--log-in"
+fi
+
+get_state() {
+    DIR="$1"
+    FILES=$(find "${DIR}" -type f,l -printf '%h/%f\t%C+-%s\n')
+    echo "${FILES}" | sort
+}
+
+BEFORE=$(get_state "${BASE}")
+
+TMPFILE=".PRJ_SCRIPT_TMP$$"
+trap "rm -f ${TMPFILE}" EXIT
+
+SHELL="${SHELL:-bash}" script --return ${NOECHO_FLAG} "${TMPFILE}"
+AFTER=$(get_state "${BASE}" | grep -v "^${TMPFILE}")
+
+# below should filter out any remaining code
+
+echo -e "\n### Code ran with ${SHELL} at ${DATE}" >> "${OUTFILE}"
+
+if [ ! -z "${MESSAGE}" ]
+then
+    echo "${MESSAGE}" >> "${OUTFILE}"
+fi
+
+echo -e "\n\`\`\`${SHELL}" >> "${OUTFILE}"
+cat "${TMPFILE}" \
+    | sed 's/\x1B\[[0-9;]\{1,\}[A-Za-z]//g' \
+    | head -n-2 \
+    | tail -n+2 \
+    >> "${OUTFILE}"
+
+echo "\`\`\`" >> "${OUTFILE}"
+
+(diff <(echo "${BEFORE}") <(echo "${AFTER}") || :) \
+    | awk -F '\t' '{printf("%s  %s\n", $2, $1)}' \
+    | prj-private-diff.sh \
+    | read -d '' DIFF
+
+if [ ! -z "${DIFF}" ]
+then
+    echo -e "\nCode has touched these files:" >> "${OUTFILE}"
+    echo "${DIFF}" >> "${OUTFILE}"
+fi

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+
+# vi: ft=bash
+set -euo pipefail
+
+CMD=$(prj-private-cli.py "$(basename $0)" "$@" <<EOF
+short="-b", long="--base", dest="BASE", type="str", default=".", help="Which base directory to use"
+long="--all", dest="ALL", type="FLAG", default=False, help="Ignore the .prjignore"
+short="-p", long="--backup", dest="BACKUP", type="str", default="", help="Which backup to compare to"
+short="-d", long="--dir", dest="DIR", type="str", default=".", help="Where to search for files"
+dest="TARGET", type=str, nargs="*", help="Only check these files"
+EOF
+)
+
+if ! (echo "${CMD}" | grep '^### prj-private-cli output$' > /dev/null)
+then
+    # help or an error occurred
+    echo "# $(basename $0)"
+    echo "${CMD}"
+    exit 0
+fi
+
+eval "${CMD}"
+
+DIR=$(realpath "${DIR}" | sed 's/\/$//')
+
+BASE="$(prj-private-findbase.sh ${BASE})"
+
+source "${BASE}/.prj"
+if [ -z "${BACKUP:-}" ]
+then
+    BACKUP="${HEAD}"
+fi
+
+if [ -f "${BACKUP}" ]
+then
+    PREV_SHA="${BACKUP}"
+elif [ -z "${BACKUP}" ]
+then
+    PREV_SHA=""
+else
+    PREV_SHA="${BASE}/${BKPDIR}/${BACKUP}.sha256"
+fi
+
+
+if [ -z "${PREV_SHA:-}" ]
+then
+    echo "Could not find backup file, printing new files"
+elif [ ! -f "${PREV_SHA:-}" ]
+then
+    echo "ERROR: File '${PREV_SHA}' does not exist" >&2
+    exit 1
+elif [ "${#TARGET[@]}" -gt 0 ]
+then
+    PREV_SHA=$(
+        cat "${PREV_SHA}" \
+        | grep \
+          --line-regex \
+          -f <(printf '[^[:space:]][^[:space:]]*[[:space:]][[:space:]]*%s\n' "${TARGET[@]}")
+    )
+else
+    PREV_SHA=$(cat "${PREV_SHA}")
+fi
+
+cd "${BASE}"
+
+[ "${ALL}" == "True" ] && ALL_FLAG="--all" || ALL_FLAG=""
+
+CHK=$(prj-sha ${ALL_FLAG} --base "${BASE}" --dir "${DIR}" "${TARGET[@]}")
+
+difference() {
+    grep --invert-match --fixed-strings --line-regexp --file $2 $1 || :
+}
+
+intersection() {
+    grep --fixed-strings --line-regexp --file $2 $1 || :
+}
+
+BKPDIFF="$((diff <(echo "${PREV_SHA}") <(echo "${CHK}") || :) | prj-private-diff.sh)"
+echo "${BKPDIFF}"

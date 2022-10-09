@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+
+# vi: ft=bash
+set -euo pipefail
+
+CMD=$(prj-private-cli.py "$(basename $0)" "$@" <<EOF
+short="-b", long="--base", dest="BASE", type="str", default=".", help="Which base directory to use"
+dest="BACKUP", type="str", help="The backup to list files from"
+dest="TARGET", type=str, nargs="*", help="Only check these files"
+EOF
+)
+
+if ! (echo "${CMD}" | grep '^### prj-private-cli output$' > /dev/null)
+then
+    # help or an error occurred
+    echo "# $(basename $0)"
+    echo "${CMD}"
+    exit 0
+fi
+
+eval "${CMD}"
+
+BASE="$(prj-private-findbase.sh ${BASE})"
+
+source "${BASE}/.prj"
+if [ "${BACKUP:-}" == "HEAD" ]
+then
+    BACKUP="${HEAD}"
+fi
+
+if [ -f "${BACKUP}" ]
+then
+    PREV_SHA="${BACKUP%.tar.gz}.sha256"
+elif [ -z "${BACKUP}" ]
+then
+    echo "ERROR: specified backup ${BACKUP} doesn't seem to exist." >&2
+    exit 1
+else
+    PREV_SHA="${BASE}/${BKPDIR}/${BACKUP}.sha256"
+    BACKUP="${BASE}/${BKPDIR}/${BACKUP}.tar.gz"
+fi
+
+if [ -z "${PREV_SHA:-}" ] || [ ! -f "${PREV_SHA:-}" ]
+then
+    echo "ERROR: Could not find sha file for the backup file ${BACKUP}." >&2
+    exit 1
+fi
+
+PREV_SHA=$(sed 's/[[:space:]][[:space:]]*/\t/' "${PREV_SHA}" | awk -F'\t' 'BEGIN {OFS="\t"} {print $2, $1}')
+
+BKPNAME=$(basename "${BACKUP%%.tar.gz}")
+TARFILES=$(tar --list -f "${BACKUP}")
+
+if [ "${#TARGET[@]}" -gt 0 ]
+then
+    readarray -t TARGET < <(prj-private-relpaths.sh "${BASE}" "${TARGET[@]}")
+    TARFILES=$(echo "${TARFILES}" | grep --line-regex -f <(printf '%s\n' "${TARGET[@]}"))
+fi
+
+join -t'	' -a 1 -j 1 <(echo "${TARFILES}") <(echo "${PREV_SHA}") \
+    | sed "s/^/${BKPNAME}\t/"

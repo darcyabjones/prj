@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+
+# vi: ft=bash
+set -euo pipefail
+
+CMD=$(prj-private-cli.py "$(basename $0)" "$@" <<EOF
+short="-b", long="--base", dest="BASE", type="str", default=".", help="Which base directory to use"
+short="-f", long="--inputfile", dest="FILE", type="str", default="", help="Where to log updates."
+short="-n", long="--noignore", dest="NOIGNORE", type="FLAG", default=False, help="Don't add the file(s) to '.prjignore'."
+short="-m", long="--message", dest="MESSAGE", type="str", default="", help="A message to write."
+dest="COMMAND", type="str", nargs="+", help="The command to run to get the files."
+EOF
+)
+
+
+if ! (echo "${CMD}" | grep '^### prj-private-cli output$' > /dev/null)
+then
+    # help or an error occurred
+    echo "# $(basename $0)"
+    echo -e "\n NOTE: if your COMMAND includes flags (e.g. -L --verbose etc), you need to put -- between the prj-add commands and the copy commands."
+    echo "${CMD}"
+    exit 0
+fi
+
+eval "${CMD}"
+
+BASE="$(prj-private-findbase.sh ${BASE})"
+
+source "${BASE}/.prj"
+DATE=$(date '+%Y%m%d-%H%M%S')
+
+[ -z "${FILE:-}" ] && FILE="${INPUTFILE}" || FILE="${BASE}/${FILE}"
+
+get_state() {
+    DIR="$1"
+    FILES=$(find "${DIR}" -type f,l -printf '%h/%f\t%C+-%s\n')
+    echo "${FILES}" \
+        | sort \
+        | awk -F'\t' -v DIR="${BASE}" '{printf("%s  %s\n", $2, substr($1, length(DIR) + 2))}'
+}
+
+BEFORE=$(get_state "${BASE}")
+OUTPUT=$("${COMMAND[@]}")
+AFTER=$(get_state "${BASE}")
+
+mkdir -p $(dirname "${FILE}")
+echo -e "\n## Added input at ${DATE}" >> "${FILE}"
+
+if [ ! -z "${MESSAGE}" ]
+then
+    echo >> "${FILE}"
+    echo "${MESSAGE}" >> "${FILE}"
+fi
+
+echo -e "\n\`\`\`" >> "${FILE}"
+echo "${COMMAND[@]}" >> "${FILE}"
+echo "\`\`\`" >> "${FILE}"
+
+DIFF=$((diff <(echo "${BEFORE}") <(echo "${AFTER}") || :) | prj-private-diff.sh)
+
+echo -e "\nCode has touched these files:" >> "${FILE}"
+echo "${DIFF}" | while read line
+do
+    echo "${line}" 1>&2
+    L=$(echo "${line}" | cut -d'	' -f1)
+    F=$(echo "${line}" | cut -d'	' -f2)
+    FR=$(realpath "${F}")
+    SHA=$(sha256sum "${FR}" | cut -d' ' -f1)
+    echo "- ${L}: ${F} (sha256:${SHA})"
+done >> "${FILE}"
+
+if [ "${NOIGNORE}" == "False" ]
+then
+    echo "${DIFF}" \
+        | awk -F'\t' '$1 == "NEW" {print $2}' \
+        | sed 's/\./\\./g' \
+        >> "${BASE}/.prjignore"
+fi
+

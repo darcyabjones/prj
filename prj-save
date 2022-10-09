@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+
+# vi: ft=bash
+set -euo pipefail
+
+CMD=$(prj-private-cli.py "$(basename $0)" "$@" <<EOF
+short="-b", long="--base", dest="BASE", type="str", default=".", help="Which base directory to use"
+short="-m", long="--message", dest="MESSAGE", type="str", default="", help="The message to save"
+long="--all", dest="ALL", type="FLAG", default=False, help="Save everything, not just the diffs"
+short="-p", long="--backup", dest="BACKUP", type="str", default="", help="Which backup to compare to"
+dest="TARGET", type=str, nargs="*", help="Only save these files"
+EOF
+)
+
+if ! (echo "${CMD}" | grep '^### prj-private-cli output$' > /dev/null)
+then
+    # help or an error occurred
+    echo "# $(basename $0)"
+    echo "${CMD}"
+    exit 0
+fi
+
+eval "${CMD}"
+
+BASE="$(prj-private-findbase.sh ${BASE})"
+
+source "${BASE}/.prj"
+DATE=$(date '+%Y%m%d-%H%M%S')
+TARBALL="${BASE}/${BKPDIR}/${DATE}.tar.gz"
+SHAFILE="${BASE}/${BKPDIR}/${DATE}.sha256"
+CHANGELOG="${BASE}/${CHANGELOG}"
+NOTEFILE="${BASE}/${NOTEFILE}"
+
+if [ -s "${NOTEFILE}" ]
+then
+    NOTES=$(cat "${NOTEFILE}")
+else
+    NOTES=""
+fi
+
+
+[ "${ALL}" == "True" ] && ALL_FLAG="--all" || ALL_FLAG=""
+CHK=$(prj-sha ${ALL_FLAG} --base "${BASE}" --dir "${BASE}" "${TARGET[@]}")
+
+if [ -z "${CHK:-}" ]
+then
+    echo "No files to save!"
+    exit 0
+fi
+
+difference() {
+    grep --invert-match --fixed-strings --line-regexp --file $2 $1 || :
+}
+
+intersection() {
+    grep --fixed-strings --line-regexp --file $2 $1 || :
+}
+
+if [ -z "${BACKUP:-}" ]
+then
+    BACKUP="${HEAD}"
+fi
+
+if [ -z "${BACKUP:-}" ]
+then
+    PREV_SHA=""
+elif [ -f $(realpath "${BACKUP}" 2> /dev/null || :) ]
+then
+    PREV_SHA=$(realpath "${BACKUP}")
+else
+    PREV_SHA="${BASE}/${BKPDIR}/${HEAD}.sha256"
+    if [ ! -f "${PREV_SHA:-}" ]
+    then
+        echo "ERROR: File '${PREV_SHA}' does not exist"
+        exit 1
+    fi
+fi
+
+# Important to cd before tar so that it decompresses properly
+cd "${BASE}"
+
+CHG=""
+
+if [ -z "${BACKUP:-}" ]
+then
+    echo "${CHK}" > "${SHAFILE}"
+    FILES="$(echo "${CHK}" | cut -d' ' -f 3-)"
+    if [ "${#TARGET[@]}" -gt 0 ]
+    then
+        FILES=$(intersection <(printf '%s\n' "${TARGET[@]}") <(echo "${FILES}"))
+    fi
+
+    CHG+="\n## ${DATE}\n"
+    CHG+="\nNew backup set:\n"
+    CHG+=$(echo "${FILES}" | sed 's/^/- NEW: /')
+    CHG+="\n"
+
+else
+    if [ "${#TARGET[@]}" -gt 0 ]
+    then
+        PREV_SHA=$(
+            cat "${PREV_SHA}" \
+            | grep \
+              --line-regex \
+              -f <(printf '[^[:space:]][^[:space:]]*[[:space:]][[:space:]]*%s\n' "${TARGET[@]}")
+        )
+    else
+        PREV_SHA=$(cat "${PREV_SHA}")
+    fi
+
+    BKPDIFF="$((diff <(echo "${PREV_SHA}") <(echo "${CHK}") || :) | prj-private-diff.sh)"
+
+    if [ "${ALL}" == "True" ]
+    then
+        FILES="$(echo "${CHK}" | cut -d' ' -f 3-)"
+    else
+        FILES="$(echo "${BKPDIFF}" | ( grep -v "^DELETED" || : ) | cut -d'	' -f 2-)"
+    fi
+
+    if [ "${#TARGET[@]}" -gt 0 ]
+    then
+        FILES=$(intersection <(echo "${FILES}") <(printf '%s\n' "${TARGET[@]}"))
+    fi
+
+    if [ -z "${FILES:-}" ]
+    then
+        echo "No changes to be saved!"
+        exit 0
+    fi
+
+    CHG+="\n\n## ${DATE}\n"
+
+    if [ ! -z "${BKPDIFF}" ]
+    then
+        CHG+="\nModified files:\n"
+        CHG+=$(echo "${BKPDIFF}" | sed 's/^/- /' | sed 's/\t/: /')
+        CHG+="\n"
+    fi
+
+    if [ "${ALL}" == "True" ]
+    then
+        COPIED=$(difference <(echo "${FILES:-}") <(echo "${BKPDIFF}" | cut -f2))
+
+        if [ ! -z "${COPIED}" ]
+        then
+            CHG+="\nCopying unmodified files as --all option was given\n"
+            CHG+="\nCopied files:\n"
+            CHG+=$(echo "${COPIED}" | sed 's/^/- /')
+            CHG+="\n"
+        fi
+    fi
+fi
+
+if [ ! -z "${MESSAGE:-}" ]
+then
+    CHG+="\n${MESSAGE}"
+fi
+
+CHGLOG_ORIG=$(cat "${CHANGELOG}")
+cleanup_err() {
+    # Remove any updates if it failed
+    echo "${CHGLOG_ORIG}" > "${CHANGELOG}"
+    rm -f '${TARBALL}' '${TARBALL}.sha256' '${SHAFILE}'
+    exit 1
+}
+
+trap cleanup_err ERR
+
+if [ ! -z "${NOTES}" ]
+then
+    CHG+="\n"
+    CHG+="\n${NOTES}"
+fi
+
+echo -e "${CHG}" >> "${CHANGELOG}"
+
+# Update the SHASUM for the changelog file
+CHGLOG_BNAME=$(echo "${CHANGELOG}" | awk -v DIR="${BASE}" '{print substr($0, length(DIR) + 2)}')
+CHGLOG_SHA=$(prj-sha --base "${BASE}" --dir "${BASE}" "${CHGLOG_BNAME}")
+echo "${CHK}" | sed "s#^.*${CHGLOG_BNAME}\$#${CHGLOG_SHA}#" > "${SHAFILE}"
+
+# The updated changelog should be in the backup
+# If CHGLOG_SHA is not empty, then it's not in prjignore
+if [ ! -z "${CHGLOG_SHA:-}" ]
+then
+    FILES+="\n$(basename "${CHANGELOG}")"
+fi
+
+echo "Creating backup with files:"
+# grep and sort removes empty lines and duplicates
+tar --create --gzip -vv --file "${TARBALL}" --files-from=<(echo -e "${FILES}" | (grep -v '^$' || :) | sort -u)
+sha256sum "${TARBALL}" > "${TARBALL}.sha256"
+
+rm -f "${NOTEFILE}"
+
+sed -i "/^HEAD/s/^.*\$/HEAD=${DATE}/" "${BASE}/.prj"

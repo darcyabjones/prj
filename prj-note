@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+
+# vi: ft=bash
+set -euo pipefail
+
+CMD=$(prj-private-cli.py "$(basename $0)" "$@" <<EOF
+short="-b", long="--base", dest="BASE", type="str", default=".", help="Which base directory to use"
+short="-o", long="--outfile", dest="OUTFILE", type="str", default="", help="Where to write the logs. Note this will always append to existing files."
+dest="MESSAGE", type="str", help="A message to write."
+EOF
+)
+
+
+if ! (echo "${CMD}" | grep '^### prj-private-cli output$' > /dev/null)
+then
+    # help or an error occurred
+    echo "# $(basename $0)"
+    echo "${CMD}"
+    exit 0
+fi
+
+eval "${CMD}"
+
+if [ -z "${MESSAGE:-}" ]
+then
+    echo "ERROR: We didn't get a message" 1>&2
+    exit 1
+fi
+
+BASE="$(prj-private-findbase.sh ${BASE})"
+
+source "${BASE}/.prj"
+DATE=$(date '+%Y%m%d-%H%M%S')
+
+# NOTEFILE is set in .bkp
+[ -z "${OUTFILE:-}" ] && OUTFILE="${NOTEFILE}"
+
+echo -e "\n### Note at ${DATE}" >> "${OUTFILE}"
+echo >> "${OUTFILE}"
+echo "${MESSAGE:-}" >> "${OUTFILE}"

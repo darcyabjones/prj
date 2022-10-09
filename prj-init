@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+
+# vi: ft=bash
+set -euo pipefail
+
+CMD=$(prj-private-cli.py "$(basename $0)" "$@" <<EOF
+long="--bkpdir", dest="BKPDIR", type="str", default="backup", help="Where to store the backups"
+long="--inputdir", dest="INPUTDIR", type="str", default="input", help="Where to store the inputs"
+long="--outputdir", dest="OUTPUTDIR", type="str", default="output", help="Where to store the outputs"
+long="--codedir", dest="CODEDIR", type="str", default="code", help="Where to store code"
+long="--envdir", dest="ENVDIR", type="str", default="envs", help="Where to store environments"
+long="--workdir", dest="WORKDIR", type="str", default="work", help="Where to working data"
+short="-c", long="--changelog", dest="CHANGELOG", type="str", default="", help="Where to store logs."
+long="--notefile", dest="NOTEFILE", type="str", default="", help="Where to cache notes to be saved later."
+long="--inputfile", dest="INPUTFILE", type="str", default="", help="Where to log the locations of inputs."
+long="--profile", dest="PRJPROFILE", type="str", default="project", choices=["project", "backup"], help="Where to cache notes to be saved later."
+short="-m", long="--message", dest="MESSAGE", type="str", default="", help="The message to save"
+dest="BASE", type="str", default=".", nargs="?", help="Which base directory to use"
+EOF
+)
+
+if ! (echo "${CMD}" | grep '^### prj-private-cli output$' > /dev/null)
+then
+    # help or an error occurred
+    echo "# $(basename $0)"
+    echo "${CMD}"
+    exit 0
+fi
+
+eval "${CMD}"
+
+[ -z "${CHANGELOG:-}" ] && CHANGELOG="${BASE}/CHANGELOG.txt"
+[ -z "${NOTEFILE:-}" ] && NOTEFILE="${BASE}/NOTES.txt"
+[ -z "${INPUTFILE:-}" ] && INPUTFILE="${BASE}/INPUTS.txt"
+
+if [ -f "${BASE}/.prj" ] || [ -f "${BASE}/.prj" ]
+then
+    echo "ERROR: There is already a \`prj\` project in the specified folder '${BASE}'." >&2
+    echo "If you really want to initialise here, you should remove \`.prj\` and \`.prjignore\`." >&2
+    exit 1
+fi
+
+mkdir -p ${BASE}
+mkdir -p ${BASE}/${BKPDIR}
+
+if [ "${PRJPROFILE}" == "project" ]
+then
+    mkdir -p "${BASE}/${INPUTDIR}"
+    mkdir -p "${BASE}/${OUTPUTDIR}"
+    mkdir -p "${BASE}/${WORKDIR}"
+    mkdir -p "${BASE}/${ENVDIR}"
+    mkdir -p "${BASE}/${CODEDIR}"
+fi
+
+BKPDIR=$(basename "${BKPDIR}")
+CHANGELOG=$(basename "${CHANGELOG}")
+NOTEFILE=$(basename "${NOTEFILE}")
+INPUTFILE=$(basename "${INPUTFILE}")
+
+cat <<EOF > "${BASE}/.prjignore"
+^\.git/.*
+^${BKPDIR}/.*
+^\.prj
+^\.prjignore
+.*\.ipynb_checkpoints\$
+^condaenv/*
+^venv/*
+^${NOTEFILE}
+EOF
+
+if [ "${PRJPROFILE}" == "project" ]
+then
+    echo "${WORKDIR}/.*" >> "${BASE}/.prjignore"
+fi
+
+cat <<EOF > "${BASE}/.prj"
+HEAD=
+CHANGELOG="${CHANGELOG}"
+NOTEFILE="${NOTEFILE}"
+INPUTFILE="${INPUTFILE}"
+PRJPROFILE="${PRJPROFILE}"
+
+BKPDIR="${BKPDIR}"
+INPUTDIR="${INPUTDIR}"
+OUTPUTDIR="${OUTPUTDIR}"
+WORKDIR="${WORKDIR}"
+ENVDIR="${ENVDIR}"
+CODEDIR="${CODEDIR}"
+EOF
+
+source "${BASE}/.prj"
+
+DATE=$(date '+%Y%m%d-%H%M%S')
+echo "## ${DATE}" >> "${BASE}/${CHANGELOG}"
+echo -e "\nInitialised ${PRJPROFILE}" >> "${BASE}/${CHANGELOG}"
+
+if [ ! -z "${MESSAGE:-}" ]
+then
+    echo -e "\n${MESSAGE}" >> "${CHANGELOG}"
+fi

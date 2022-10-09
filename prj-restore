@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+CMD=$(prj-private-cli.py "$(basename $0)" "$@" <<EOF
+short="-b", long="--base", dest="BASE", type="str", default=".", help="Which base directory to use"
+short="-m", long="--message", dest="MESSAGE", type="str", default="", help="The message to save"
+short="-d", long="--delete", dest="DELETE", type="FLAG", default=False, help="Delete files as well as overwriting them. Disabled if TARGET provided."
+short="-o", long="--outfile", dest="OUTFILE", type="str", default="", help="Where to write the logs. Note this will always append to existing files."
+short="-y", long="--yes", dest="YES", type="FLAG", default=False, help="Don't confirm overwrites."
+dest="BACKUP", type="str", help="The backup to restore files from"
+dest="TARGET", type=str, nargs="*", help="Only save these files"
+EOF
+)
+
+if ! (echo "${CMD}" | grep '^### prj-private-cli output$' > /dev/null)
+then
+    # help or an error occurred
+    echo "# $(basename $0)"
+    echo "${CMD}"
+    exit 0
+fi
+
+eval "${CMD}"
+
+BASE="$(prj-private-findbase.sh ${BASE})"
+cd "${BASE}"
+
+source "${BASE}/.prj"
+DATE=$(date '+%Y%m%d-%H%M%S')
+if [ "${BACKUP:-}" == "HEAD" ]
+then
+    BACKUP="${HEAD}"
+fi
+
+# NOTEFILE is set in .bkp
+[ -z "${OUTFILE:-}" ] && OUTFILE="${NOTEFILE}"
+
+# Deals with case of empty strings
+if [ "${#TARGET[@]}" -gt 0 ]
+then
+    readarray -t TARGET < <(prj-private-relpaths.sh "${BASE}" "${TARGET[@]}")
+fi
+
+if [ "${#TARGET[@]}" -gt 0 ]
+then
+    DELETE="False"
+fi
+
+FILES=$(prj-find --base "${BASE}" "${BACKUP}" "${TARGET[@]}")
+
+cleanup() {
+    EC="$?"
+    FN="$1"
+    BKPNAME="$2"
+    if [ "${EC}" -ne 0 ] && [ -f "${BKPNAME}" ]
+    then
+        echo "ERROR: Encountered error so restoring original file ${FN}." >&2
+        echo -e "\nERROR: While extracting ${FN}, original retained" >> "${OUTFILE}"
+        mv "${BKPNAME}" "${FN}"
+    fi
+
+    rm -f "${BKPNAME}"
+    exit "${EC}"
+}
+
+ask() {
+    FN="$1"
+    TAR="$2"
+    while true
+    do
+        printf "Replace '${FN}' with the copy from '${TAR}'? [yn] "
+        read RESPONSE
+        case "${RESPONSE}" in
+            [Yy]*) return 0; break;;
+            [Nn]*) return 1; break;;
+            *) echo "Please select [y]es or [n]o." ;;
+        esac
+    done
+}
+
+echo -e "\n## Restoring files from ${BACKUP} on ${DATE}" >> "${OUTFILE}"
+echo -e "\nExtracting files:" >> "${OUTFILE}"
+
+# -u 3 is needed here to allow user input from stdin in ask
+while read -u 3 LINE
+do
+    BKP=$(echo "${LINE}" | cut -d'	' -f 1)
+    FN=$(echo "${LINE}" | cut -d'	' -f 2)
+    SHA=$(echo "${LINE}" | cut -d'	' -f 3)
+    TARNAME="${BASE}/${BKPDIR}/${BKP}.tar.gz"
+
+    BKPNAME="${FN}.bkp$$"
+    trap "cleanup '${FN}' '${BKPNAME}'" ERR
+
+    if [ ! -z "${FN}" ]
+    then
+        if [ -f "${FN}" ]
+        then
+            OLDSHA=$(sha256sum "${FN}" | cut -d' ' -f 1)
+            OP="MODIFIED"
+        else
+            OLDSHA=
+            OP="NEW"
+        fi
+
+        if [ -f "${FN}" ] && [ "${SHA}" == "${OLDSHA}" ]
+        then
+            echo "NOTE: Skipping '${FN}' as the checksums are the same."
+            echo "- SAME: ${FN} (sha: ${SHA})" >> "${OUTFILE}"
+            continue
+        fi
+
+        # We only ask permission if the file exists.
+        if [ "${YES}" == "False" ] && [ -f "${FN}" ]
+        then
+            ask "${FN}" "${TARNAME}" || continue
+        fi
+
+        if [ -f "${FN}" ]
+        then
+            mv "${FN}" "${BKPNAME}"
+        fi
+
+        tar --extract --gzip --file="${TARNAME}" "${FN}"
+        NEWSHA=$(sha256sum "${FN}" | cut -d' ' -f 1)
+
+        if [ "${SHA}" != "${NEWSHA}" ]
+        then
+            echo "ERROR: the extracted file '${FN}' from '${TARNAME}' doesn't match the expected checksum!" >&2
+            exit 1
+        else
+            rm -f "${BKPNAME}"
+        fi
+
+        [ -z "${OLDSHA}" ] && EXTRABIT="" || EXTRABIT="${OLDSHA} > "
+        echo "- ${OP}: ${FN} (sha: ${EXTRABIT}${SHA})" >> "${OUTFILE}"
+    fi
+done 3<<< "${FILES}"
+
+
+ask_delete() {
+    FILES="$1"
+    echo -e "\nYou specified --delete so we're removing files not in ${BACKUP}."
+    echo -e "This will remove the following files:"
+    echo "${FILES}" | sed 's/^/- /'
+    while true
+    do
+        read -p "Do you want to continue? [yn], use i to select individually. " RESPONSE
+        case "${RESPONSE}" in
+            [Yy]*) return 0; break;;
+            [Nn]*) return 1; break;;
+            [Ii]*) return 2; break;;
+            *) echo "Please select [y]es or [n]o or i." ;;
+        esac
+    done
+}
+
+ask_indiv() {
+    FN="$1"
+    while true
+    do
+        read -p "Remove file '${FN}'? [yn] " RESPONSE
+        case "${RESPONSE}" in
+            [Yy]*) return 0; break;;
+            [Nn]*) return 1; break;;
+            *) echo "Please select [y]es or [n]o." ;;
+        esac
+    done
+}
+
+if [ "${DELETE}" == "True" ]
+then
+    BKPIGNORE=$(cat "${BASE}/.prjignore")
+    TODELETE=$(find "${BASE}" -type f,l | awk -v DIR="${BASE}" '{print substr($0, length(DIR) + 2)}')
+
+    if [ ! -z "${BKPIGNORE:-}" ] && [ ! -z "${TODELETE:-}" ]
+    then
+        TODELETE=$(echo "${TODELETE}" | (grep --no-filename --invert-match -f <(echo "${BKPIGNORE}") || : ))
+    fi
+
+    if [ ! -z "${TODELETE:-}" ]
+    then
+        TODELETE=$(echo "${TODELETE}" | (grep --no-filename --invert-match -f <(echo "${FILES}" | cut -d'	' -f2) || : ) | (grep -v '^$' || :))
+    fi
+
+    if [ ! -z "${TODELETE}" ]
+    then
+        echo "1${TODELETE}1"
+        echo -e "\nDeleting files not present in ${BACKUP}:" >> "${OUTFILE}"
+    fi
+
+    if [ "${YES}" == "False" ] && [ ! -z "${TODELETE}" ]
+    then
+        ASK_CODE=0
+        ask_delete "${TODELETE}" || ASK_CODE=$?
+
+        case "${ASK_CODE}" in
+            0)
+                echo "${TODELETE}" \
+                    | xargs -I {} sh -c 'rm -f {} && echo "- DELETED: {}"' \
+                    >> "${OUTFILE}"
+                ;;
+            1) : ;;
+            2)
+                while read -u 4 LINE
+                do
+                    if ask_indiv "${LINE}"
+                    then
+                        rm -f "${LINE}"
+                        echo "- DELETED: ${LINE}" >> "${OUTFILE}"
+                    fi
+                done 4<<< "${TODELETE}"
+            ;;
+        esac
+    elif [ ! -z "${TODELETE}" ]
+    then
+        echo "${TODELETE}" \
+            | xargs -I {} sh -c 'rm -f {} && echo "- DELETED: {}"' \
+            >> "${OUTFILE}"
+    else
+        echo "NOTE: Didn't find any files to be deleted"
+    fi
+fi
+
+
+echo -e "\nCompleted without error!" >> "${OUTFILE}"

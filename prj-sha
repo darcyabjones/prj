@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+
+# vi: ft=bash
+set -euo pipefail
+
+CMD=$(prj-private-cli.py "$(basename $0)" "$@" <<EOF
+short="-b", long="--base", dest="BASE", type="str", default=".", help="Which base directory to use"
+long="--all", dest="ALL", type="FLAG", default=False, help="Ignore the .prjignore"
+short="-d", long="--dir", dest="DIR", type="str", default=".", help="Where to search for files"
+dest="TARGET", type=str, nargs="*", help="Only check these files"
+EOF
+)
+
+if ! (echo "${CMD}" | grep '^### prj-private-cli output$' > /dev/null)
+then
+    # help or an error occurred
+    echo "# $(basename $0)"
+    echo "${CMD}"
+    exit 0
+fi
+
+eval "${CMD}"
+
+DIR=$(realpath "${DIR}" | sed 's/\/$//')
+
+BASE="$(prj-private-findbase.sh ${BASE})"
+
+cd "${BASE}"
+
+if [ "${ALL:-}" == "True" ]
+then
+    BKPIGNORE=""
+else
+    BKPIGNORE=$(cat "${BASE}/.prjignore")
+fi
+
+
+FILES=$(find "${DIR}" -type f,l | awk -v DIR="${BASE}" '{print substr($0, length(DIR) + 2)}')
+
+if [ ! -z "${BKPIGNORE:-}" ] && [ ! -z "${FILES:-}" ]
+then
+    FILES=$(echo "${FILES}" | (grep --no-filename --invert-match -f <(echo "${BKPIGNORE}") || : ))
+fi
+
+if [ "${#TARGET[@]}" -gt 0 ] && [ ! -z "${FILES:-}" ]
+then
+    FILES=$(echo "${FILES}" | (grep --no-filename -f <(printf "%s\n" "${TARGET[@]}") || : ))
+fi
+
+if [ -z "${FILES:-}" ]
+then
+    exit 0
+fi
+
+echo "${FILES}" \
+    | sort \
+    | parallel --keep-order -I {} sha256sum {}

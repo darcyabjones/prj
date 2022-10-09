@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+
+# vi: ft=bash
+set -euo pipefail
+
+help() {
+    echo "USAGE: prj subcommand [options ...]"
+    echo -e "\nValid subcommands:"
+    for sc in init add save restore find note shell run sbatch diff sha help
+    do
+        echo "- ${sc}"
+    done
+
+    echo -e "\nTo display this message use subcommand 'help' or --help."
+    echo -e "\nFor help with a specific command use --help e.g.:"
+    echo "prj init --help"
+}
+
+if [ $# -lt 1 ]
+then
+    echo "# prj"
+    help
+    exit 0
+fi
+
+SUBCOMMAND=$1
+shift
+
+case "${SUBCOMMAND:-}" in
+    init)
+        prj-init "$@"
+    ;;
+    diff)
+        prj-diff "$@"
+    ;;
+    add)
+        prj-add "$@"
+    ;;
+    save)
+        prj-save "$@"
+    ;;
+    restore)
+        prj-restore "$@"
+    ;;
+    find)
+        prj-find "$@"
+    ;;
+    sha)
+        prj-sha "$@"
+    ;;
+    note)
+        prj-note "$@"
+    ;;
+    shell)
+        prj-shell "$@"
+    ;;
+    run)
+        prj-run "$@"
+    ;;
+    sbatch)
+        prj-sbatch "$@"
+    ;;
+    --help|help)
+        echo "# prj"
+        help
+        exit 0
+    ;;
+    *)
+        echo "ERROR: got invalid subcommand ${SUBCOMMAND:-}" 1>&2
+        help 1>&2
+        exit 1
+    ;;
+esac
