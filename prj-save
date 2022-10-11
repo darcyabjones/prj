@@ -67,7 +67,7 @@ fi
 
 
 DATE=$(date '+%Y%m%d-%H%M%S')
-MAX_TAR_SIZE=50000  #$(( "${MAXSIZE:-4}" * 1000000 ))
+MAX_TAR_SIZE=$(( "${MAXSIZE:-4}" * 1000000000 ))
 SHAFILE="${BKPDIR}/${DATE}.sha256"
 CHANGELOG_BNAME="${CHANGELOG_:-${CHANGELOG:-CHANGELOG.txt}}"
 CHANGELOG="${BASE}/${CHANGELOG_BNAME}"
@@ -108,7 +108,7 @@ already_compressed() {
         gz|gzip|tgz|xz|txz|bzip|bz|bzip2|bz2|tbz|tbz2|zst|zl|zz|lzma|tlzma|tlz|lz|lz4|sfs|z) return 0;;
         7z|zip|rar) return 0;;
         deb|rpm|sif|jar|pkg) return 0;;
-        h5|hdf5|npz|parquet|bam|ubam|cram|ucram|bcf|og|vg|xg|gcsa|gam) return 0;;
+        h5|hdf5|fast5|npz|parquet|bam|ubam|cram|ucram|bcf|og|vg|xg|gcsa|gam) return 0;;
         *) return 1;;
     esac
 }
@@ -161,7 +161,7 @@ get_best_archive() {
 }
 
 TARGET_FILES=$(prj-find --base "${BASE}" <(echo "${CHK}") "${TARGET[@]}")
-UNBACKEDUP_FILES=$(echo "${TARGET_FILES}" | awk -v CHG="${CHANGELOG_BNAME}" '($1 == "MISSING") && ($3 != CHG)' )
+UNBACKEDUP_FILES=$(echo "${TARGET_FILES}" | awk -v CHG="${CHANGELOG_BNAME}" '($1 == "MISSING") && ($3 != CHG)' | (grep -v '^[[:space:]]*$' || :))
 
 if [ -z "${TARGET_FILES:-}" ]
 then
@@ -236,9 +236,13 @@ then
 
     while read -u 4 LINE
     do
+        if [ -z "${LINE}" ]
+        then
+            continue
+        fi
         SHA=$(echo "${LINE}" | cut -d'	' -f 2)
         FN=$(echo "${LINE}" | cut -d'	' -f 3)
-        FN_SIZE=$(find $(dirname "${FN}") -name $(basename "${FN}") -printf "%s\n")
+        FN_SIZE=$(find "$(dirname "${FN:-./}")" -name "$(basename "${FN}")" -printf "%s\n")
         write_to_tar "${BKPDIR}" "${SHA}" "${FN}" "${FN_SIZE}"
     done 4<<< "${UNBACKEDUP_FILES}"
 fi

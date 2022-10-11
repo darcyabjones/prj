@@ -214,6 +214,7 @@ do
         echo "ERROR: the extracted file '${FN}' from '${TARNAME}' doesn't match the expected checksum!" >&2
         exit 1
     else
+        mkdir -p "$(dirname "${FN}")"
         mv "${TMPFILE}" "${FN}"
         rm -f "${TMPFILE}"
     fi

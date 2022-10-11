@@ -130,5 +130,93 @@ echo -e "\nInitialised ${PRJPROFILE}" >> "${BASE}/${CHANGELOG}"
 
 if [ ! -z "${MESSAGE:-}" ]
 then
-    echo -e "\n${MESSAGE}" >> "${CHANGELOG}"
+    echo -e "\n${MESSAGE}" >> ${BASE}/"${CHANGELOG}"
 fi
+
+
+cat <<EOF > "${BASE}/${BKPDIR}/BACKUP_STRUCTURE.txt"
+# How to recover data from this project
+
+This project was managed by the [\`prj\` tool](https://github.com/darcyabjones/prj).
+A full history of the project of the results and files can be obtained from '${CHANGELOG}'.
+
+Backups are stored in the '${BKPDIR}' folder as uncompressed [\`tar\` archives](https://www.gnu.org/software/tar/).
+If possible, I recommend recovering data using [\`prj\`](https://github.com/darcyabjones/prj), or at least read a bit about how backups are managed there.
+
+Files are stored in the \`tar\` archives by their [sha256 checksum](https://en.wikipedia.org/wiki/Checksum).
+Some files are compressed individually to minimize space, in which case they will have the corresponding file extension (e.g. \`.gz\` for [gzip compression](https://en.wikipedia.org/wiki/Gzip)).
+Archives may also have a \`.MANIFEST\` file, which lists the checksums and extensions contained within the \`tar\` archive.
+
+
+# Manual recovery
+
+If you can't use \`prj\` you can recover the files yourself using the following process.
+Something like this should also work in [powershell](https://learn.microsoft.com/en-us/powershell/) or [CMD](https://en.wikipedia.org/wiki/Cmd.exe).
+Both have \`tar\` available in the newer versions, but decompression of files might be more challenging.
+If you can access a [\`bash\`](https://www.gnu.org/software/bash/) (or any other unix) terminal it will be much easier.
+
+To list the contents of a \`tar\` archive without the MANIFEST file you can do:
+
+\`\`\`
+# Use the --verbose flag to emulate ls -l.
+tar --list -f bkp-0001.tar
+
+# Might list:
+# 85d26abde9b5135b3ebc3bc615f4f096bccf64b446d36ef5ee2e6c4bd60e45c3.gz
+# b512993f1ded4a1c3415ef8580f000c0db7ee158577789458fbc8d7f5f50f19b
+# 20221011-133247.sha256
+\`\`\`
+
+The actual snapshots of project state are stored as \`.sha256\` files by their date of creation.
+The dates should correspond to an entry in '${CHANGELOG}'.
+These checksums contain the filename and a checksum.
+Ordinarily you would use these files to check file integrity (e.g. \`sha256sum -c 20221011-133247.sha256\`).
+Below is an example of what this might look like.
+
+\`\`\`
+b512993f1ded4a1c3415ef8580f000c0db7ee158577789458fbc8d7f5f50f19b  Carientinum-chloroplast.fasta.gz
+85d26abde9b5135b3ebc3bc615f4f096bccf64b446d36ef5ee2e6c4bd60e45c3  README.md
+\`\`\`
+
+
+To recover data from the \`tar\` archive, find the file you're interested in one of the \`.sha256\` files.
+If you're missing the \`.sha256\` sums but have the tar archives you'll be able to find them in the tar archives with \`tar --list\`, they are just stored using their regular name (for this reason), and you can extract them as below. 
+
+Find the corresponding sha256 sum in the \`tar\` archives or MANIFEST files.
+Using the example sha256 sums from above, you can use the following command to extract the file.
+
+\`\`\`
+# The last element here has come from tar --list earlier
+tar --extract --file="bkp-0001.tar" "b512993f1ded4a1c3415ef8580f000c0db7ee158577789458fbc8d7f5f50f19b"
+
+tar --extract --file="bkp-0001.tar" "85d26abde9b5135b3ebc3bc615f4f096bccf64b446d36ef5ee2e6c4bd60e45c3.gz"
+# If the file is compressed like above, you can decompress with the appropriate tool
+gunzip "85d26abde9b5135b3ebc3bc615f4f096bccf64b446d36ef5ee2e6c4bd60e45c3.gz"
+# Creates: "85d26abde9b5135b3ebc3bc615f4f096bccf64b446d36ef5ee2e6c4bd60e45c3"
+\`\`\`
+
+Notice that we didn't have to decompress \`b512993f*\` (corresponding to \`Carientinum-chloroplast.fasta.gz\`).
+That's because it was already compressed, so we didn't bother compressing it again when adding it to the tar archive.
+Other compressed filename extensions you might encounter are \`.bz2\`, \`.xz\`, and \`.zst\` which can be decompressed using [bzip2](https://en.wikipedia.org/wiki/Bzip2), [xz/lzma](https://en.wikipedia.org/wiki/XZ_Utils), and [zstandard](https://en.wikipedia.org/wiki/Zstd), respectively.
+
+Now we can rename those files from the checksum name to the original given the \`.sha256\` mapping.
+You can rename them however you like, it e.g. \`README.md\` could be moved to \`restored_readme.txt\`.
+Note that \`mv\` will overwrite files without warning, if you have an existing \`README.md\` file you might consider renaming one or the other.
+
+\`\`\`
+mv b512993f1ded4a1c3415ef8580f000c0db7ee158577789458fbc8d7f5f50f19b Carientinum-chloroplast.fasta.gz
+mv 85d26abde9b5135b3ebc3bc615f4f096bccf64b446d36ef5ee2e6c4bd60e45c3 README.md
+\`\`\`
+
+You could now run a checksum again to make sure that the file is exactly the same as it was before it was backed up.
+
+\`\`\`
+sha256sum Carientinum-chloroplast.fasta.gz README.md
+\`\`\`
+
+This should return the same thing as the snapshot \`.sha256\` file.
+As long as the two checksums are the same, the file is intact (the filename doesn't matter and won't affect the checksum, rename them however you like).
+
+
+The \`prj-restore\` tool just automates that process for you, and can run it for entire snapshots or just one file.
+EOF
