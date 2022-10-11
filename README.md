@@ -1,7 +1,7 @@
 # prj
 
 This provides utilities for data analysis project tracking and backup.
-It offers some basic functionality based on my opiniated balance between best practice and practicality.
+It offers some basic functionality based on my personal balance of best practice and practicality.
 
 Features are:
 - simple logging functions to keep track of file changes
@@ -18,12 +18,17 @@ The problem is that it's never quite as easy as you want it to be, and when some
 But the biggest problem is that in universities our institutional storage is all on NFS filesystems designed to be used on windows.
 This causes lots of weird issues using `git annex` (links are now supported, but WSL2 doesn't connect to external drives in fully compatible ways yet).
 I also really like the note taking that's integrated into `datalad`, but for most bioinformatics analyses the run-times are too high and the potential for errors are so numerous that I need some way of frankensteining the results together.
+[Borg](https://www.borgbackup.org/) is also a really cool project and addresses much of what `prj` does in a more elegant way.
+The main reason for sticking with `tar` over Borg is future accessibility.
+Borg may disappear in 5 years, but `tar` isn't going anywhere so we can still recover backups in the future.
+If you just need a clever short-term backup system without all of the logging things then Borg is a great option.
 
 `prj` is not a fully featured version control system that can track multiple branches and merge distributed changes.
-It is however fairly simple, hackable, broadly compatible with git code tracking, and everything is stored out in the open.
+It is however fairly simple, hackable, compatible with git, and everything is stored out in the open.
 I can copy my files however I like without worrying whether XXX software is present on the other end, and if I want to copy intermediate results (that I don't intend to backup) that's ok too.
 
-Anyway, all of this is to say, this stuff was written for the way that I want to work and I think it's a good compromise.
+Anyway, all of this is to say, this stuff was written for the way that I want to work.
+If it's something that you think you'd like to try or you have issues/ideas, then [create an issue on github](https://github.com/darcyabjones/prj/issues).
 
 
 ## Install
@@ -46,7 +51,9 @@ That's what I do, and I can just add new features etc as I need it.
 
 We track file changes using SHA256 sums, which can take a long time to compute (particularly for large files).
 We use checksums because NFS filesystem modification times are generally pretty unreliable, and each filesystem stores them slightly differently.
-We compute checksums in parallel to speed things up, but this will use all available CPUs and I haven't implemented a thread-limiting parameter yet. It's probably best not to run `prj-sha`, `prj-save`, `prj-diff`, or `prj-restore` on a supercomputer head node.
+By default some tasks can run in parallel with 2 processes to speed things up.
+You can increase performance of `prj-sha`, `prj-save`, `prj-diff`, or `prj-restore` by specifying `--cpus` (use a negative number to use all available cores).
+Probably best not to do this on a supercomputer head note though :)
 
 
 Any commands with the prefix `prj-private` **are not intended to be used by you**, they're helper scripts that are called by the other commands.
@@ -64,8 +71,8 @@ You can add incremental notes to the file `NOTES.txt` using `prj note` (or just 
 Code can be run and automatically logged to `NOTES.txt` using `prj shell`, `prj run` and `prj sbatch`.
 
 You can save a snapshot of the project using `prj save`.
-This script will save any new or modified files to a gzipped tar-ball, in the `backups` folder.
-Unchanged files that were in the previous backup are not stored in the new tarball, as they can be recovered from the previous one.
+This script will save any new or modified files to a tarball, in the `backups` folder.
+Unchanged files that were in a previous backup are not stored in the new tarball, as they can be recovered from the previous one.
 `prj save` will write a record of the files that are being backed up and add any notes from `NOTES.txt` to the `CHANGELOG.txt`, which will then be included in the backup tarball.
 The `NOTES.txt` file is removed after it has been successfully added to the `CHANGELOG.txt`.
 
@@ -83,6 +90,29 @@ The other (e.g. README.md) file can of course be backed up, so previous reports 
 Note that nothing is preventing you from tracking code, CHANGELOG.txt, readmes etc using `git` as well as `prj`.
 It may work well with some clever `.prjignore` and `.gitignore` configurations.
 
+
+## Backup system
+
+The backups are stored in uncompressed `tar` files.
+We compress individual files as we add them to the tarball. This makes listing files in the tarball faster, and means that we can skip compression of already compressed files.
+The files are stored with their sha checksum as the filename, and any files that are compressed during backup will have an extension corresponding to the compression program.
+We store the files as their checksums as it means we avoid adding duplicates, we don't get filename clashes.
+The actual filenames for each `save` are stored as a standard checksum file (e.g. `sha256sum  filename`).
+When you restore the file, it looks for the corresponding sha256 sums in the tar balls, and restores the file to the filename given a particular save snapshot (decompressing as necessary).
+
+To avoid creating huge `.tar` files, we restrict the maximum size to `4GB` (can be changed in `.prj`).
+This just helps when copying file, creating checksums before and after copying, and listing files within each tarball will also be faster.
+The backup system will try to pack as much in to each tar file without exceeding the size limit. This means that files for a single snapshot may be spread over multiple tar files.
+Files larger than the size limit will be alone in their own tar file.
+
+To speed up finding files within the tar files, we also store a `MANIFEST` file which simply lists the contents.
+This manifest can be regenerated using `prj remanifest *.tar`.
+
+The snapshot checksum files are also stored in the tar-balls as plain text.
+If for whatever reason you lose the `.sha256` files you can `tar --extract` them.
+Note that the files corresponding to that snapshot file may be in a different tarball.
+
+
 ## `prj`
 
 `prj` is organised under several subcommands.
@@ -98,6 +128,8 @@ Valid subcommands:
 - add
 - save
 - restore
+- remanifest
+- find
 - note
 - shell
 - run
@@ -121,9 +153,10 @@ More details to come.
 # prj-init
 usage: prj-init [-h] [--bkpdir BKPDIR] [--inputdir INPUTDIR]
                 [--outputdir OUTPUTDIR] [--codedir CODEDIR] [--envdir ENVDIR]
-                [--workdir WORKDIR] [-c CHANGELOG] [--notefile NOTEFILE]
-                [--inputfile INPUTFILE] [--profile {project,backup}]
-                [-m MESSAGE]
+                [--workdir WORKDIR] [--changelog CHANGELOG]
+                [--notefile NOTEFILE] [--inputfile INPUTFILE]
+                [--profile {project,backup}] [-c {gzip,bzip2,zstd}]
+                [-l COMP_LEVEL] [-m MESSAGE]
                 [BASE]
 
 positional arguments:
@@ -138,13 +171,20 @@ options:
   --codedir CODEDIR     Where to store code
   --envdir ENVDIR       Where to store environments
   --workdir WORKDIR     Where to working data
-  -c CHANGELOG, --changelog CHANGELOG
+  --changelog CHANGELOG
                         Where to store logs.
   --notefile NOTEFILE   Where to cache notes to be saved later.
   --inputfile INPUTFILE
                         Where to log the locations of inputs.
   --profile {project,backup}
                         Where to cache notes to be saved later.
+  -c {gzip,bzip2,zstd}, --compression {gzip,bzip2,zstd}
+                        Which compression algorithm to use when archiving
+                        files. Note that these tools will be needed for future
+                        decompression, so choose wisely.
+  -l COMP_LEVEL, --compression-level COMP_LEVEL
+                        Use this compression level instead of the program
+                        default. Integer
   -m MESSAGE, --message MESSAGE
                         The message to save
 ```
@@ -160,7 +200,7 @@ Messages will be logged to a file called `INPUTS.txt`, which you can edit as you
 ```
 # prj-add
 
- NOTE: if your COMMAND includes flags (e.g. -L --verbose etc), you need to put -- between the prj-add commands and the copy commands.
+NOTE: if your COMMAND includes flags (e.g. -L --verbose etc), you need to put -- between the prj-add commands and the copy commands.
 usage: prj-add [-h] [-b BASE] [-f FILE] [-n] [-m MESSAGE]
                COMMAND [COMMAND ...]
 
@@ -186,7 +226,11 @@ Note that like `datalad` we don't bother with staging changes to be made etc. Yo
 
 ```
 # prj-save
-usage: prj-save [-h] [-b BASE] [-m MESSAGE] [--all] [-p BACKUP] [TARGET ...]
+usage: prj-save [-h] [-b BASE] [-m MESSAGE] [--all] [--cpus CPUS]
+                [-c {global,gzip,bzip2,zstd}] [-l COMP_LEVEL]
+                [--notefile NOTEFILE_] [--changelog CHANGELOG_]
+                [--tmp THISTMPDIR] [--bkpdir BKPDIR]
+                [TARGET ...]
 
 positional arguments:
   TARGET                Only save these files
@@ -197,8 +241,25 @@ options:
   -m MESSAGE, --message MESSAGE
                         The message to save
   --all                 Save everything, not just the diffs
-  -p BACKUP, --backup BACKUP
-                        Which backup to compare to
+  --cpus CPUS           What's the maximum number of CPUs we can use? Use -1
+                        for all.
+  -c {global,gzip,bzip2,zstd}, --compression {global,gzip,bzip2,zstd}
+                        Which compression algorithm to use when archiving
+                        files. Note that these tools will be needed for future
+                        decompression, so choose wisely.
+  -l COMP_LEVEL, --compression_level COMP_LEVEL
+                        Use this compression level instead of the program
+                        default.
+  --notefile NOTEFILE   Where to cache notes to be saved later.
+  --changelog CHANGELOG
+                        Where to store logs.
+  --tmp TMPDIR          Where to store intermediate files. Default from TMPDIR
+                        or working directory.
+  --bkpdir BKPDIR       Which backup directory to use. Mandatory if you're not
+                        in a prj project. If specified you probably want this
+                        to be somewhere outside of your current working
+                        directory (or --base) to avoid backing up previous
+                        backups.
 ```
 
 
@@ -212,11 +273,13 @@ Logs changes to `NOTES.txt`.
 
 ```
 # prj-restore
-usage: prj-restore [-h] [-b BASE] [-m MESSAGE] [-d] [-o OUTFILE] [-y]
+usage: prj-restore [-h] [-b BASE_] [-m MESSAGE] [-d] [--notefile NOTEFILE]
+                   [-y] [--cpus CPUS] [--tmp TMPDIR]
                    BACKUP [TARGET ...]
 
 positional arguments:
-  BACKUP                The backup to restore files from
+  BACKUP                The backup to restore files from. Use HEAD to restore
+                        from latest save.
   TARGET                Only save these files
 
 options:
@@ -226,10 +289,25 @@ options:
                         The message to save
   -d, --delete          Delete files as well as overwriting them. Disabled if
                         TARGET provided.
-  -o OUTFILE, --outfile OUTFILE
-                        Where to write the logs. Note this will always append
-                        to existing files.
+  --notefile NOTEFILE   Where to cache notes to be saved later.
   -y, --yes             Don't confirm overwrites.
+  --cpus CPUS           What's the maximum number of CPUs we can use? Use -1
+                        for all.
+  --tmp TMPDIR          Where to store intermediate files. Default from TMPDIR
+                        or working directory.
+```
+
+## `prj-remanifest`
+
+```
+# prj-remanifest
+usage: prj-remanifest [-h] BACKUP [BACKUP ...]
+
+positional arguments:
+  BACKUP      The tarfiles to update the manifest for
+
+options:
+  -h, --help  show this help message and exit
 ```
 
 
@@ -247,8 +325,11 @@ That's all this does, look through the tar-files to find where it is.
 usage: prj-find [-h] [-b BASE] BACKUP [TARGET ...]
 
 positional arguments:
-  BACKUP                The backup to look for files in
-  TARGET                Only look for the locations of these files, not the whole snapshot
+  BACKUP                The backup to look for files in. Use HEAD to compare
+                        with latest. Use ALL to show all locations of all
+                        backup files.
+  TARGET                Only look for the locations of these files, not the
+                        whole snapshot
 
 options:
   -h, --help            show this help message and exit
@@ -284,6 +365,8 @@ It uses `script` to log anything you do, and saves the code and lists any modifi
 We do some cleaning up of the `script` output, but it's never quite perfect so you may like to edit the `NOTES.txt` file.
 NOTE: like `prj-add` this just identifies file changes using modification times and presence absence. If you make changes using another program these will show up in the list here too.
 
+Using the `--no-echo` flag will avoid having odd output if you use tab expansion of up-arrows to find previous commands.
+But this will also suppress any results (i.e. only log what you type).
 
 ```
 # prj-shell
@@ -325,18 +408,20 @@ NOTE: diffs are calculated based on SHA256 sums, so this may take a long time if
 
 ```
 # prj-diff
-usage: prj-diff [-h] [-b BASE] [--all] [-p BACKUP] [-d DIR] [TARGET ...]
+usage: prj-diff [-h] [-b BASE] [--all] [--cpus CPUS] BACKUP [TARGET ...]
 
 positional arguments:
+  BACKUP                Which backup to compare to. Use HEAD to compare with
+                        latest. Use ALL to show all tracked files in the
+                        project.
   TARGET                Only check these files
 
 options:
   -h, --help            show this help message and exit
   -b BASE, --base BASE  Which base directory to use
   --all                 Ignore the .prjignore
-  -p BACKUP, --backup BACKUP
-                        Which backup to compare to
-  -d DIR, --dir DIR     Where to search for files
+  --cpus CPUS           What's the maximum number of CPUs we can use? Use -1
+                        for all.
 ```
 
 
@@ -348,7 +433,7 @@ Mostly used as an internal utility, but might be useful e.g. for checking integr
 
 ```
 # prj-sha
-usage: prj-sha [-h] [-b BASE] [--all] [-d DIR] [TARGET ...]
+usage: prj-sha [-h] [-b BASE] [--all] [--cpus CPUS] [TARGET ...]
 
 positional arguments:
   TARGET                Only check these files
@@ -357,5 +442,6 @@ options:
   -h, --help            show this help message and exit
   -b BASE, --base BASE  Which base directory to use
   --all                 Ignore the .prjignore
-  -d DIR, --dir DIR     Where to search for file
+  --cpus CPUS           What's the maximum number of CPUs we can use? Use -1
+                        for all.
 ```

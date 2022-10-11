@@ -10,10 +10,12 @@ long="--outputdir", dest="OUTPUTDIR", type="str", default="output", help="Where 
 long="--codedir", dest="CODEDIR", type="str", default="code", help="Where to store code"
 long="--envdir", dest="ENVDIR", type="str", default="envs", help="Where to store environments"
 long="--workdir", dest="WORKDIR", type="str", default="work", help="Where to working data"
-short="-c", long="--changelog", dest="CHANGELOG", type="str", default="", help="Where to store logs."
+long="--changelog", dest="CHANGELOG", type="str", default="", help="Where to store logs."
 long="--notefile", dest="NOTEFILE", type="str", default="", help="Where to cache notes to be saved later."
 long="--inputfile", dest="INPUTFILE", type="str", default="", help="Where to log the locations of inputs."
 long="--profile", dest="PRJPROFILE", type="str", default="project", choices=["project", "backup"], help="Where to cache notes to be saved later."
+short="-c", long="--compression", dest="COMPRESSION", type="str", default="gzip", choices=["gzip", "bzip2", "zstd"], help="Which compression algorithm to use when archiving files. Note that these tools will be needed for future decompression, so choose wisely."
+short="-l", long="--compression-level", dest="COMP_LEVEL", type="str", default="", help="Use this compression level instead of the program default. Integer"
 short="-m", long="--message", dest="MESSAGE", type="str", default="", help="The message to save"
 dest="BASE", type="str", default=".", nargs="?", help="Which base directory to use"
 EOF
@@ -38,6 +40,32 @@ then
     echo "ERROR: There is already a \`prj\` project in the specified folder '${BASE}'." >&2
     echo "If you really want to initialise here, you should remove \`.prj\` and \`.prjignore\`." >&2
     exit 1
+fi
+
+if [ "${COMPRESSION}" == "gzip" ]
+then
+    [ -z "${COMP_LEVEL:-}" ] && COMP_LEVEL=6
+    if [ "${COMP_LEVEL}" -lt 1 ] || [ "${COMP_LEVEL}" -gt 9 ]
+    then
+        echo "ERROR: compression levels for gzip must be between 1 and 9" >&2
+        exit 1
+    fi
+elif [ "${COMPRESSION}" == "bzip2" ]
+then
+    [ -z "${COMP_LEVEL:-}" ] && COMP_LEVEL=9
+    if [ "${COMP_LEVEL}" -lt 1 ] || [ "${COMP_LEVEL}" -gt 9 ]
+    then
+        echo "ERROR: compression levels for bzip2 must be between 1 and 9" >&2
+        exit 1
+    fi
+elif [ "${COMPRESSION}" == "zstd" ]
+then
+    [ -z "${COMP_LEVEL:-}" ] && COMP_LEVEL=19
+    if [ "${COMP_LEVEL}" -lt 1 ] || [ "${COMP_LEVEL}" -gt 19 ]
+    then
+        echo "ERROR: compression levels for zstd must be between 1 and 19" >&2
+        exit 1
+    fi
 fi
 
 mkdir -p ${BASE}
@@ -80,7 +108,13 @@ NOTEFILE="${NOTEFILE}"
 INPUTFILE="${INPUTFILE}"
 PRJPROFILE="${PRJPROFILE}"
 
-BKPDIR="${BKPDIR}"
+# Max size of each backup tar file in GB
+# Files bigger than this will be on their own :)
+MAXSIZE=4
+COMPRESSION="${COMPRESSION}"
+COMPRESSION_LEVEL="${COMP_LEVEL}"
+
+BACKUP_DIR="${BKPDIR}"
 INPUTDIR="${INPUTDIR}"
 OUTPUTDIR="${OUTPUTDIR}"
 WORKDIR="${WORKDIR}"

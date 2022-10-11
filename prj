@@ -6,7 +6,7 @@ set -euo pipefail
 help() {
     echo "USAGE: prj subcommand [options ...]"
     echo -e "\nValid subcommands:"
-    for sc in init add save restore find note shell run sbatch diff sha help
+    for sc in init add save restore remanifest find note shell run sbatch diff sha help
     do
         echo "- ${sc}"
     done
@@ -41,6 +41,9 @@ case "${SUBCOMMAND:-}" in
     ;;
     restore)
         prj-restore "$@"
+    ;;
+    remanifest)
+        prj-remanifest "$@"
     ;;
     find)
         prj-find "$@"

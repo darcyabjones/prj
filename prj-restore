@@ -3,12 +3,14 @@
 set -euo pipefail
 
 CMD=$(prj-private-cli.py "$(basename $0)" "$@" <<EOF
-short="-b", long="--base", dest="BASE", type="str", default=".", help="Which base directory to use"
+short="-b", long="--base", dest="BASE_", type="str", default="", help="Which base directory to use"
 short="-m", long="--message", dest="MESSAGE", type="str", default="", help="The message to save"
 short="-d", long="--delete", dest="DELETE", type="FLAG", default=False, help="Delete files as well as overwriting them. Disabled if TARGET provided."
-short="-o", long="--outfile", dest="OUTFILE", type="str", default="", help="Where to write the logs. Note this will always append to existing files."
+long="--notefile", dest="NOTEFILE_", type="str", default="", help="Where to cache notes to be saved later."
 short="-y", long="--yes", dest="YES", type="FLAG", default=False, help="Don't confirm overwrites."
-dest="BACKUP", type="str", help="The backup to restore files from"
+long="--cpus", dest="CPUS", type=int, default=2, help="What's the maximum number of CPUs we can use? Use -1 for all."
+long="--tmp", dest="THISTMPDIR", type=str, default="", help="Where to store intermediate files. Default from TMPDIR or working directory."
+dest="BACKUP", type="str", help="The backup to restore files from. Use HEAD to restore from latest save."
 dest="TARGET", type=str, nargs="*", help="Only save these files"
 EOF
 )
@@ -23,18 +25,73 @@ fi
 
 eval "${CMD}"
 
-BASE="$(prj-private-findbase.sh ${BASE})"
-cd "${BASE}"
-
-source "${BASE}/.prj"
-DATE=$(date '+%Y%m%d-%H%M%S')
-if [ "${BACKUP:-}" == "HEAD" ]
+if [ ! -z "${THISTMPDIR:-}" ]
 then
-    BACKUP="${HEAD}"
+    TMPDIR="${THISTMPDIR}"
+elif [ -z "${TMPDIR:-}" ]
+then
+    TMPDIR="${PWD}"
 fi
 
-# NOTEFILE is set in .bkp
-[ -z "${OUTFILE:-}" ] && OUTFILE="${NOTEFILE}"
+EC=0
+if [ -z "${BASE_:-}" ]
+then
+    BASE="$(prj-private-findbase.sh "${PWD}" 2> /dev/null)" || EC="$?"
+else
+    BASE="$(prj-private-findbase.sh "${BASE_}" True 2> /dev/null)" || EC="$?"
+fi
+
+if [ "${EC}" -eq 2 ] && [ ! -z "${BASE_}"]
+then
+    BKPDIR="${BASE}"
+elif [ "${EC}" -eq 0 ] && [ ! -z "${BASE:-}" ]
+then
+    source "${BASE}/.prj"
+    BKPDIR="${BASE}/${BACKUP_DIR}"
+
+    if [ -z "${BACKUP:-}" ] || [ "${BACKUP:-}" == "HEAD" ]
+    then
+        BACKUP="${HEAD}"
+    fi
+elif [ "${EC}" -eq 2 ] && [ -z "${BASE_:-}" ]
+then
+    echo "WARNING: Couldn't find any 'prj' projects." >&2
+    echo "WARNING: If you use restore outside of a 'prj' product, you should specify the backup directory with --base." >&2
+    echo "WARNING: Will attempt to use current working directory as BASE dir." >&2
+    BKPDIR="${BASE}"
+elif [ "${EC}" -ne 0 ]
+then
+    exit "${EC}"
+else
+    echo "ERROR: this shouldn't happen" >&2
+    exit 1
+fi
+
+if [ "${BACKUP}" == "HEAD" ]
+then
+    echo "ERROR: Could not find a backup corresponding to HEAD" >&2
+    echo "ERROR: This could happen if you're outside a bkp project or you don't have any previous backups." >&2
+    echo "ERROR: Try providing the actual path to the sha256 sums" >&2
+    exit 1
+fi
+
+
+if [ -e "${BACKUP}" ]
+then
+    BACKUP_SHA="${BACKUP}"
+elif [ -e "${BKPDIR}/${BACKUP}.sha256" ]
+then
+    BACKUP_SHA="${BKPDIR}/${BACKUP}.sha256"
+else
+    echo "ERROR: could not find a backup corresponding to '${BACKUP}'" >&2
+    exit 1
+fi
+
+cd "${BASE}"
+
+DATE=$(date '+%Y%m%d-%H%M%S')
+NOTEFILE="${BASE}/${NOTEFILE_:-${NOTEFILE:-NOTES.txt}}"
+
 
 # Deals with case of empty strings
 if [ "${#TARGET[@]}" -gt 0 ]
@@ -47,20 +104,40 @@ then
     DELETE="False"
 fi
 
-FILES=$(prj-find --base "${BASE}" "${BACKUP}" "${TARGET[@]}")
+CHK=$(prj-sha --cpus "${CPUS}" --base "${BASE}" "${TARGET[@]}")
+BKPDIFF=$(
+    (diff <(sort "${BACKUP_SHA}") <(echo "${CHK}" | sort) || :) \
+        | prj-private-diff.sh \
+        | (grep -v '^[[:space:]]*$' || :)
+)
+readarray -t BKPFILES < <(echo "${BKPDIFF}" | awk '$1 != "NEW"' | cut -f 2)
+BKPFILES=$(prj-find --base "${BASE}" "${BACKUP}" "${BKPFILES[@]}")
+
+BKPDIFF=$(
+    join -t'	' -a 1 --check-order -1 2 -2 3 -e "MISSING" -o $'1.1\t1.2\t2.1\t2.2\t2.4' \
+        <(echo "${BKPDIFF}" | sort -u -k 2b,2) \
+        <(echo "${BKPFILES}" | sort -u -k 3b,3)
+)
+
+BKPDIFF=$(
+    join -t'	' -a 1 --check-order -1 2 -2 2 -e "MISSING" -o $'1.1\t1.2\t2.1\t1.3\t1.4\t1.5' \
+        <(echo "${BKPDIFF}" | sort -u -k 2b,2) \
+        <(echo "${CHK}" | sed 's/[[:space:]][[:space:]]*/\t/' | sort -u -k 2b,2)
+)
+# status filename currentchecksum tarfile bkpchecksum compression
+
+unset BKPFILES
 
 cleanup() {
     EC="$?"
     FN="$1"
-    BKPNAME="$2"
-    if [ "${EC}" -ne 0 ] && [ -f "${BKPNAME}" ]
+    TMPNAME="$2"
+    if [ "${EC}" -ne 0 ] && [ -f "${TMPNAME}" ]
     then
-        echo "ERROR: Encountered error so restoring original file ${FN}." >&2
-        echo -e "\nERROR: While extracting ${FN}, original retained" >> "${OUTFILE}"
-        mv "${BKPNAME}" "${FN}"
+        echo -e "\nERROR: While extracting ${FN}, original retained" >> "${NOTEFILE}"
     fi
 
-    rm -f "${BKPNAME}"
+    rm -f "${TMPNAME}"
     exit "${EC}"
 }
 
@@ -79,73 +156,81 @@ ask() {
     done
 }
 
-echo -e "\n## Restoring files from ${BACKUP} on ${DATE}" >> "${OUTFILE}"
-echo -e "\nExtracting files:" >> "${OUTFILE}"
+echo -e "\n## Restoring files from ${BACKUP} on ${DATE}" | tee --append "${NOTEFILE}"
+
+NEWMOD_FILES=$(echo "${BKPDIFF}" \
+    | awk 'BEGIN {OFS="\t"} $1 == "MODIFIED" {print} $1 == "DELETED" {$1="NEW"; print}' \
+    | (grep -v '^[[:space:]]*$' || :))
+DELETE_FILES=$(echo "${BKPDIFF}" \
+    | awk 'BEGIN {OFS="\t"} $1 == "NEW" {$1="DELETE"; print $1, $2, $3}' \
+    | (grep -v '^[[:space:]]*$' || :))
+
+if [ ! -z "${NEWMOD_FILES}" ]
+then
+    echo -e "\nExtracting files:" | tee --append "${NOTEFILE}"
+fi
 
 # -u 3 is needed here to allow user input from stdin in ask
 while read -u 3 LINE
 do
-    BKP=$(echo "${LINE}" | cut -d'	' -f 1)
+    if [ -z "${LINE}" ]
+    then
+        continue
+    fi
+
+    # status filename currentchecksum tarfile bkpchecksum compression
+    STATUS=$(echo "${LINE}" | cut -d'	' -f 1)
     FN=$(echo "${LINE}" | cut -d'	' -f 2)
     SHA=$(echo "${LINE}" | cut -d'	' -f 3)
-    TARNAME="${BASE}/${BKPDIR}/${BKP}.tar.gz"
+    TAR=$(echo "${LINE}" | cut -d'	' -f 4)
+    BKPSHA=$(echo "${LINE}" | cut -d'	' -f 5)
+    COMP=$(echo "${LINE}" | cut -d'	' -f 6)
 
-    BKPNAME="${FN}.bkp$$"
-    trap "cleanup '${FN}' '${BKPNAME}'" ERR
+    TARNAME="${BKPDIR}/${TAR}"
 
-    if [ ! -z "${FN}" ]
+    TMPFILE="${TMPDIR}/tmp-$(basename "${FN}")"
+    trap "cleanup '${FN}' '${TMPFILE}'" ERR
+
+    # We only ask permission if the file exists.
+    if [ "${YES}" == "False" ] && [ -f "${FN}" ]
     then
-        if [ -f "${FN}" ]
-        then
-            OLDSHA=$(sha256sum "${FN}" | cut -d' ' -f 1)
-            OP="MODIFIED"
-        else
-            OLDSHA=
-            OP="NEW"
-        fi
-
-        if [ -f "${FN}" ] && [ "${SHA}" == "${OLDSHA}" ]
-        then
-            echo "NOTE: Skipping '${FN}' as the checksums are the same."
-            echo "- SAME: ${FN} (sha: ${SHA})" >> "${OUTFILE}"
-            continue
-        fi
-
-        # We only ask permission if the file exists.
-        if [ "${YES}" == "False" ] && [ -f "${FN}" ]
-        then
-            ask "${FN}" "${TARNAME}" || continue
-        fi
-
-        if [ -f "${FN}" ]
-        then
-            mv "${FN}" "${BKPNAME}"
-        fi
-
-        tar --extract --gzip --file="${TARNAME}" "${FN}"
-        NEWSHA=$(sha256sum "${FN}" | cut -d' ' -f 1)
-
-        if [ "${SHA}" != "${NEWSHA}" ]
-        then
-            echo "ERROR: the extracted file '${FN}' from '${TARNAME}' doesn't match the expected checksum!" >&2
-            exit 1
-        else
-            rm -f "${BKPNAME}"
-        fi
-
-        [ -z "${OLDSHA}" ] && EXTRABIT="" || EXTRABIT="${OLDSHA} > "
-        echo "- ${OP}: ${FN} (sha: ${EXTRABIT}${SHA})" >> "${OUTFILE}"
+        ask "${FN}" "${TARNAME}" || continue
     fi
-done 3<<< "${FILES}"
 
+    if [ "${COMP}" == "uncompressed" ]
+    then
+        tar --extract --to-stdout --file="${TARNAME}" "${BKPSHA}" > "${TMPFILE}"
+    else
+        COMPTOOL=$(prj-private-getcomptool.sh decompress "${COMP}" 1 "${CPUS}")
+        tar --extract --to-stdout --file="${TARNAME}" "${BKPSHA}.${COMP}" \
+            | ${COMPTOOL} \
+            > "${TMPFILE}"
+    fi
+
+    NEWSHA=$(sha256sum "${TMPFILE}" | cut -d' ' -f 1)
+
+    if [ "${BKPSHA}" != "${NEWSHA}" ]
+    then
+        echo "ERROR: the extracted file '${FN}' from '${TARNAME}' doesn't match the expected checksum!" >&2
+        exit 1
+    else
+        mv "${TMPFILE}" "${FN}"
+        rm -f "${TMPFILE}"
+    fi
+
+    [ -z "${SHA}" ] && EXTRABIT="" || EXTRABIT="${SHA} > "
+    echo "- ${STATUS}: ${FN} (sha: ${EXTRABIT}${BKPSHA})" >> "${NOTEFILE}"
+done 3<<< "${NEWMOD_FILES}"
+# status filename currentchecksum tarfile bkpchecksum compressionext
 
 ask_delete() {
     FILES="$1"
     echo -e "\nYou specified --delete so we're removing files not in ${BACKUP}."
     echo -e "This will remove the following files:"
-    echo "${FILES}" | sed 's/^/- /'
+    echo "${FILES}" | awk '{printf("- %s (sha:%s)\n", $2, $3)}'
     while true
     do
+        echo
         read -p "Do you want to continue? [yn], use i to select individually. " RESPONSE
         case "${RESPONSE}" in
             [Yy]*) return 0; break;;
@@ -157,10 +242,12 @@ ask_delete() {
 }
 
 ask_indiv() {
-    FN="$1"
+    LINE="$1"
     while true
     do
-        read -p "Remove file '${FN}'? [yn] " RESPONSE
+        FN=$(echo "${LINE}" | cut -f 2)
+        SHA=$(echo "${LINE}" | cut -f 3)
+        read -p "Remove file '${FN}' (sha: ${SHA})? [yn] " RESPONSE
         case "${RESPONSE}" in
             [Yy]*) return 0; break;;
             [Nn]*) return 1; break;;
@@ -171,35 +258,23 @@ ask_indiv() {
 
 if [ "${DELETE}" == "True" ]
 then
-    BKPIGNORE=$(cat "${BASE}/.prjignore")
-    TODELETE=$(find "${BASE}" -type f,l | awk -v DIR="${BASE}" '{print substr($0, length(DIR) + 2)}')
 
-    if [ ! -z "${BKPIGNORE:-}" ] && [ ! -z "${TODELETE:-}" ]
+    if [ ! -z "${DELETE_FILES}" ]
     then
-        TODELETE=$(echo "${TODELETE}" | (grep --no-filename --invert-match -f <(echo "${BKPIGNORE}") || : ))
+        echo -e "\nDeleting files not present in ${BACKUP}:" >> "${NOTEFILE}"
     fi
 
-    if [ ! -z "${TODELETE:-}" ]
-    then
-        TODELETE=$(echo "${TODELETE}" | (grep --no-filename --invert-match -f <(echo "${FILES}" | cut -d'	' -f2) || : ) | (grep -v '^$' || :))
-    fi
-
-    if [ ! -z "${TODELETE}" ]
-    then
-        echo "1${TODELETE}1"
-        echo -e "\nDeleting files not present in ${BACKUP}:" >> "${OUTFILE}"
-    fi
-
-    if [ "${YES}" == "False" ] && [ ! -z "${TODELETE}" ]
+    if [ "${YES}" == "False" ] && [ ! -z "${DELETE_FILES}" ]
     then
         ASK_CODE=0
-        ask_delete "${TODELETE}" || ASK_CODE=$?
+        ask_delete "${DELETE_FILES}" || ASK_CODE=$?
 
         case "${ASK_CODE}" in
             0)
-                echo "${TODELETE}" \
+                echo "${DELETE_FILES}" \
+                    | cut -f 2 \
                     | xargs -I {} sh -c 'rm -f {} && echo "- DELETED: {}"' \
-                    >> "${OUTFILE}"
+                    | tee --append "${NOTEFILE}"
                 ;;
             1) : ;;
             2)
@@ -207,21 +282,23 @@ then
                 do
                     if ask_indiv "${LINE}"
                     then
-                        rm -f "${LINE}"
-                        echo "- DELETED: ${LINE}" >> "${OUTFILE}"
+                        FN=$(echo "${LINE}" | cut -f 2)
+                        rm -f "${FN}"
+                        echo "- DELETED: ${FN}" >> "${NOTEFILE}"
                     fi
-                done 4<<< "${TODELETE}"
+                done 4<<< "${DELETE_FILES}"
             ;;
         esac
     elif [ ! -z "${TODELETE}" ]
     then
         echo "${TODELETE}" \
+            | cut -f 2 \
             | xargs -I {} sh -c 'rm -f {} && echo "- DELETED: {}"' \
-            >> "${OUTFILE}"
+            | tee --append "${NOTEFILE}"
     else
         echo "NOTE: Didn't find any files to be deleted"
     fi
 fi
 
 
-echo -e "\nCompleted without error!" >> "${OUTFILE}"
+echo -e "\nCompleted without error!" | tee --append "${NOTEFILE}"

@@ -3,8 +3,8 @@
 set -euo pipefail
 
 CMD=$(prj-private-cli.py "$(basename $0)" "$@" <<EOF
-short="-b", long="--base", dest="BASE", type="str", default=".", help="Which base directory to use"
-dest="BACKUP", type="str", help="The backup to look for files in"
+short="-b", long="--base", dest="BASE", type="str", default="", help="Which base directory to use"
+dest="BACKUP", type="str", help="The backup to look for files in. Use HEAD to compare with latest. Use ALL to show all locations of all backup files."
 dest="TARGET", type=str, nargs="*", help="Only look for the locations of these files, not the whole snapshot"
 EOF
 )
@@ -19,36 +19,81 @@ fi
 
 eval "${CMD}"
 
-BASE="$(prj-private-findbase.sh ${BASE})"
-
-source "${BASE}/.prj"
-if [ "${BACKUP:-}" == "HEAD" ]
+BACKUP=$(echo "${BACKUP}" | (grep -v '^[[:space:]]*$' || :))
+if [ -z "${BACKUP}" ]
 then
-    BACKUP="${HEAD}"
+    echo "ERROR: BACKUP was an empty string. We need a value here." >2
+    exit 1
 fi
 
-if [ -f "${BACKUP}" ]
+EC=0
+if [ -z "${BASE:-}" ]
 then
-    PREV_SHA="${BACKUP%.tar.gz}.sha256"
+    BASE=$(prj-private-findbase.sh "${PWD}" 2> /dev/null) || EC="$?"
 else
-    BACKUP=$(basename "${BACKUP%.tar.gz}")
-    PREV_SHA="${BASE}/${BKPDIR}/${BACKUP}.sha256"
-    BACKUP="${BASE}/${BKPDIR}/${BACKUP}.tar.gz"
+    BASE=$(prj-private-findbase.sh "${BASE}" True 2> /dev/null) || EC="$?"
 fi
 
-if [ -z "${BACKUP:-}" ] || [ ! -f "${BACKUP:-}" ]
+if [ "${EC}" -eq 2 ] && [ "${BACKUP:-}" != "HEAD" ]
 then
-    echo "ERROR: The backup file ${BACKUP} does not exist." >&2
+    BKPDIR="${BASE}"
+elif [ "${EC}" -eq 0 ] && [ ! -z "${BASE:-}" ]
+then
+    source "${BASE}/.prj"
+    BKPDIR="${BASE}/${BACKUP_DIR}"
+
+    if [ -z "${BACKUP:-}" ] || [ "${BACKUP:-}" == "HEAD" ]
+    then
+        BACKUP="${HEAD}"
+    fi
+elif [ "${EC}" -ne 0 ]
+then
+    exit "${EC}"
+else
+    echo "ERROR: this shouldn't happen" >&2
     exit 1
 fi
 
-if [ -z "${PREV_SHA:-}" ] || [ ! -f "${PREV_SHA:-}" ]
+if [ "${BACKUP}" == "HEAD" ]
 then
-    echo "ERROR: Could not find sha file for the backup file ${BACKUP}." >&2
+    echo "ERROR: Could not find a backup corresponding to head" >&2
+    echo "ERROR: This could happen if you're outside a bkp project or you don't have any previous backups." >&2
+    echo "ERROR: Try providing the actual path to the sha256 sums" >&2
     exit 1
 fi
 
-TARGET_SHAS=$(sed 's/[[:space:]][[:space:]]*/\t/' "${PREV_SHA}" | awk -F'\t' 'BEGIN {OFS="\t"} {print $2, $1}')
+if [ -e "${BACKUP}" ]
+then
+    SHAS=( "${BACKUP}" )
+elif [ -e "${BKPDIR}/${BACKUP}.sha256" ]
+then
+    SHAS=( "${BKPDIR}/${BACKUP}.sha256" )
+elif [ "${BACKUP}" == "ALL" ]
+then
+    S=$(find "${BKPDIR}" -name "*.sha256" )
+    if [ -z "${S}" ]
+    then
+        echo "ERROR: You specified 'ALL', but we couldn't find any .sha256 files in your backup directory." >&2
+        echo "ERROR: Make sure that you are in a prj project or --base is specified correctly" >&2
+        exit 1
+    fi
+
+    readarray -t SHAS < <(echo "${S}")
+else
+    echo "ERROR: This shouldn't happen, contact the authors." >&2
+    exit 1
+fi
+
+for SHA in "${SHAS[@]}"
+do
+    if [ -z "${SHA:-}" ] || [ ! -e "${SHA:-}" ]
+    then
+        echo "ERROR: The backup file ${SHA:-${BACKUP}} does not exist." >&2
+        exit 1
+    fi
+done
+
+TARGET_SHAS=$(cat "${SHAS[@]}" | sed 's/[[:space:]][[:space:]]*/\t/' | sort -u)
 
 # Deals with case of empty strings
 if [ "${#TARGET[@]}" -gt 0 ]
@@ -56,41 +101,43 @@ then
     readarray -t TARGET < <(prj-private-relpaths.sh "${BASE}" "${TARGET[@]}")
 fi
 
+# CD after getting new target paths to allow relative paths in command
+cd "${BASE}"
+
 if [ "${#TARGET[@]}" -gt 0 ]
 then
-    TARGET_SHAS=$(echo "${TARGET_SHAS}" | grep -f <(printf '^%s[[:space:]][A-Za-z0-9][A-Za-z0-9]*$\n' "${TARGET[@]}"))
+    TARGET_SHAS=$(echo "${TARGET_SHAS}" \
+        | (grep -v '^[[:space:]]*$' || :) \
+        | (grep -f <(printf '^[A-Za-z0-9][A-Za-z0-9]*[[:space:]]%s$\n' "${TARGET[@]}") || :))
 fi
 
+TARFILES=$(find "${BKPDIR}" -name "*.tar")
 
-BACKUPS=$(ls "${BASE}/${BKPDIR}/"*.tar.gz | awk -v BKP="${BACKUP}" '$0 <= BKP' | sort -r | tr '\0' 'X')
+if [ -z "${TARFILES}" ]
+then
+    echo "${TARGET_SHAS}" | sed 's/^/MISSING\t/ ; s/$/\tNA/'
+    exit 0
+fi
 
-echo "${TARGET_SHAS}" | while read LINE
+MANIFESTS=( )
+while read -u 3 TARFILE
 do
-    TARGET_FILE=$(echo "${LINE}" | cut -d'	' -f 1)
-    TARGET_SHA=$(echo "${LINE}" | cut -d'	' -f 2)
-
-    export GOTIT=
-    while read BKP
-    do
-        TARFILE_LINE=$(prj-tarlist --base "${BASE}" "${BKP}" "${TARGET_FILE}") || :
-
-        if [ ! -z "${TARFILE_LINE}" ]
-        then
-            TARFILE_BKP=$(echo "${TARFILE_LINE}" | cut -d'	' -f 1)
-            TARFILE_SHA=$(echo "${TARFILE_LINE}" | cut -d'	' -f 3)
-            if [[ "${TARFILE_SHA}" == "${TARGET_SHA}" ]]
-            then
-                export GOTIT="${TARFILE_BKP}"
-                break
-            fi
-        fi
-    done <<< "${BACKUPS}"
-    # Using heredoc style needed to avoid subshell, causing GOTIT to remain unset
-
-    if [ -z "${GOTIT}" ]
+    MANIFEST="${TARFILE%%.tar}.MANIFEST"
+    if [ ! -s "${MANIFEST}" ]
     then
-        echo "WARNING: could not find file corresponding to ${TARGET_FILE} with ${TARGET_SHA}" >&2
-    else
-        echo -e "${GOTIT}\t${TARGET_FILE}\t${TARGET_SHA}"
+        prj-remanifest "${TARFILE}"
     fi
-done
+    MANIFESTS+=( "${MANIFEST}" )
+done 3<<< "${TARFILES}"
+
+INNERFILES=$(cat "${MANIFESTS[@]}" | awk -F "\t" 'BEGIN {OFS="\t"} {print $2, $3, $1}')
+JOINED=$(
+    join -t'	' --check-order -a 2 -j 1 -e "MISSING" -o '1.3	2.1	2.2	1.2' \
+      <(echo -e "${INNERFILES}" | sort -u -k 1b,1) \
+      <(echo -e "${TARGET_SHAS}" | sort -u -k 1b,1) \
+    | awk -F"\t" 'BEGIN {OFS="\t"} $4 == "MISSING" {$4 = "NA"; print} {print}' \
+    | (grep -v '^[[:space:]]*$' || :) \
+    | sort -u
+)
+
+echo -e "${JOINED}"

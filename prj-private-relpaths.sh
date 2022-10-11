@@ -16,6 +16,7 @@ BASE="$(prj-private-findbase.sh ${BASE})"
 
 for TARGET in "$@"
 do
+    TARGET=$(echo "${TARGET}" | (grep -v '^[[:space:]]*$' || :))
     if [ -z "${TARGET:-}" ]
     then
         continue

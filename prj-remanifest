@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+
+# vi: ft=bash
+set -euo pipefail
+
+CMD=$(prj-private-cli.py "$(basename $0)" "$@" <<EOF
+dest="BACKUP", type="str", nargs="+", help="The tarfiles to update the manifest for"
+EOF
+)
+
+
+if ! (echo "${CMD}" | grep '^### prj-private-cli output$' > /dev/null)
+then
+    # help or an error occurred
+    echo "# $(basename $0)"
+    echo "${CMD}"
+    exit 0
+fi
+
+eval "${CMD}"
+
+for TF in "${BACKUP[@]}"
+do
+    TB=$(basename "${TF}")
+    MANIFEST="${TF%.tar}.MANIFEST"
+    # tar<tab>sha<tab>compression
+    tar --list -f "${TF}" \
+        | sed '/\./ s/\.\(.*\)$/\t\1/; /^[^[:space:]]*$/ s/$/\tuncompressed/' \
+        | awk -v TB="${TB}" '{printf("%s\t%s\n", TB, $0)}' \
+        | awk -F "\t" '
+            BEGIN {OFS="\t"}
+	    ($3 == "gz") || ($3 == "bz2") || ($3 == "zst") {print; next}
+            $3 != "uncompressed" {$2=sprintf("%s.%s", $2, $3); $3="uncompressed"; print; next}
+            {print}
+            ' \
+    > "${MANIFEST}"
+done

@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 
 # vi: ft=bash
+
 set -euo pipefail
 
 CMD=$(prj-private-cli.py "$(basename $0)" "$@" <<EOF
-short="-b", long="--base", dest="BASE", type="str", default=".", help="Which base directory to use"
+short="-b", long="--base", dest="BASE", type="str", default="", help="Which base directory to use"
 short="-m", long="--message", dest="MESSAGE", type="str", default="", help="The message to save"
 long="--all", dest="ALL", type="FLAG", default=False, help="Save everything, not just the diffs"
-short="-p", long="--backup", dest="BACKUP", type="str", default="", help="Which backup to compare to"
+long="--cpus", dest="CPUS", type=int, default=2, help="What's the maximum number of CPUs we can use? Use -1 for all."
+short="-c", long="--compression", dest="COMP", type="str", default="global", choices=["global", "gzip", "bzip2", "zstd"], help="Which compression algorithm to use when archiving files. Note that these tools will be needed for future decompression, so choose wisely."
+short="-l", long="--compression_level", dest="COMP_LEVEL", type="str", default="", help="Use this compression level instead of the program default."
+long="--notefile", dest="NOTEFILE_", type="str", default="", help="Where to cache notes to be saved later."
+long="--changelog", dest="CHANGELOG_", type="str", default="", help="Where to store logs."
+long="--tmp", dest="THISTMPDIR", type=str, default="", help="Where to store intermediate files. Default from TMPDIR or working directory."
+long="--bkpdir", dest="BKPDIR", type="str", default="", help="Which backup directory to use. Mandatory if you're not in a prj project. If specified you probably want this to be somewhere outside of your current working directory (or --base) to avoid backing up previous backups."
 dest="TARGET", type=str, nargs="*", help="Only save these files"
 EOF
 )
@@ -22,14 +29,59 @@ fi
 
 eval "${CMD}"
 
-BASE="$(prj-private-findbase.sh ${BASE})"
+if [ ! -z "${THISTMPDIR:-}" ]
+then
+    TMPDIR="${THISTMPDIR}"
+elif [ -z "${TMPDIR:-}" ]
+then
+    TMPDIR="${PWD}"
+fi
 
-source "${BASE}/.prj"
+EC=0
+if [ -z "${BASE:-}" ]
+then
+    BASE="$(prj-private-findbase.sh "${PWD}" 2> /dev/null)" || EC="$?"
+else
+    BASE="$(prj-private-findbase.sh "${BASE}" True 2> /dev/null)" || EC="$?"
+fi
+
+if [ "${EC}" -eq 2 ] && [ ! -z "${BKPDIR:-}" ]
+then
+    BKPDIR=$(realpath "${BKPDIR}")
+elif [ "${EC}" -eq 0 ] && [ ! -z "${BASE:-}" ]
+then
+    source "${BASE}/.prj"
+    [ -z "${BKPDIR}" ] && BKPDIR="${BASE}/${BACKUP_DIR}"
+elif [ "${EC}" -eq 2 ] && [ -z "${BKPDIR:-}" ]
+then
+    echo "ERROR: Couldn't find any 'prj' projects." >&2
+    echo "ERROR: If you use save outside of a 'prj' product, you must specify the backup directory to --bkpdir." >&2
+    exit 1
+elif [ "${EC}" -ne 0 ]
+then
+    exit "${EC}"
+else
+    echo "ERROR: this shouldn't happen" >&2
+    exit 1
+fi
+
+
 DATE=$(date '+%Y%m%d-%H%M%S')
-TARBALL="${BASE}/${BKPDIR}/${DATE}.tar.gz"
-SHAFILE="${BASE}/${BKPDIR}/${DATE}.sha256"
-CHANGELOG="${BASE}/${CHANGELOG}"
-NOTEFILE="${BASE}/${NOTEFILE}"
+MAX_TAR_SIZE=50000  #$(( "${MAXSIZE:-4}" * 1000000 ))
+SHAFILE="${BKPDIR}/${DATE}.sha256"
+CHANGELOG_BNAME="${CHANGELOG_:-${CHANGELOG:-CHANGELOG.txt}}"
+CHANGELOG="${BASE}/${CHANGELOG_BNAME}"
+NOTEFILE="${BASE}/${NOTEFILE_:-${NOTEFILE:-NOTES.txt}}"
+
+[ "${COMP:-}" == "global" ] && COMP="${COMPRESSION:-gzip}"
+[ -z "${COMP_LEVEL:-}" ] && COMP_LEVEL="${COMPRESSION_LEVEL:-6}"
+COMP_COMMAND=$(prj-private-getcomptool.sh compress "${COMP}" "${COMP_LEVEL}" ${CPUS})
+
+case "${COMP}" in
+    gzip) COMP_EXT="gz";;
+    bzip2) COMP_EXT="bz2";;
+    zstd) COMP_EXT="zst";;
+esac
 
 if [ -s "${NOTEFILE}" ]
 then
@@ -38,9 +90,8 @@ else
     NOTES=""
 fi
 
-
 [ "${ALL}" == "True" ] && ALL_FLAG="--all" || ALL_FLAG=""
-CHK=$(prj-sha ${ALL_FLAG} --base "${BASE}" --dir "${BASE}" "${TARGET[@]}")
+CHK=$(prj-sha ${ALL_FLAG} --cpus "${CPUS}" --base "${BASE}" "${TARGET[@]}")
 
 if [ -z "${CHK:-}" ]
 then
@@ -48,107 +99,91 @@ then
     exit 0
 fi
 
-difference() {
-    grep --invert-match --fixed-strings --line-regexp --file $2 $1 || :
+already_compressed() {
+    FN="${1,,}" # lowecase
+    EXT="${FN##*.}"
+    # Using case just makes it easier to write lots of extensions
+    case "${EXT}" in
+        jpg|jpeg) return 0;;
+        gz|gzip|tgz|xz|txz|bzip|bz|bzip2|bz2|tbz|tbz2|zst|zl|zz|lzma|tlzma|tlz|lz|lz4|sfs|z) return 0;;
+        7z|zip|rar) return 0;;
+        deb|rpm|sif|jar|pkg) return 0;;
+        h5|hdf5|npz|parquet|bam|ubam|cram|ucram|bcf|og|vg|xg|gcsa|gam) return 0;;
+        *) return 1;;
+    esac
 }
-
-intersection() {
-    grep --fixed-strings --line-regexp --file $2 $1 || :
-}
-
-if [ -z "${BACKUP:-}" ]
-then
-    BACKUP="${HEAD}"
-fi
-
-if [ -z "${BACKUP:-}" ]
-then
-    PREV_SHA=""
-elif [ -f $(realpath "${BACKUP}" 2> /dev/null || :) ]
-then
-    PREV_SHA=$(realpath "${BACKUP}")
-else
-    PREV_SHA="${BASE}/${BKPDIR}/${HEAD}.sha256"
-    if [ ! -f "${PREV_SHA:-}" ]
-    then
-        echo "ERROR: File '${PREV_SHA}' does not exist"
-        exit 1
-    fi
-fi
 
 # Important to cd before tar so that it decompresses properly
 cd "${BASE}"
 
-CHG=""
+find_next_number() {
+    BACKUPDIR="$1"
+    TF=$(find "${BACKUPDIR}" \
+        -name "*.tar" \
+        -printf '%f\n')
 
-if [ -z "${BACKUP:-}" ]
-then
-    echo "${CHK}" > "${SHAFILE}"
-    FILES="$(echo "${CHK}" | cut -d' ' -f 3-)"
-    if [ "${#TARGET[@]}" -gt 0 ]
+    if [ -z "${TF:-}" ]
     then
-        FILES=$(intersection <(printf '%s\n' "${TARGET[@]}") <(echo "${FILES}"))
-    fi
-
-    CHG+="\n## ${DATE}\n"
-    CHG+="\nNew backup set:\n"
-    CHG+=$(echo "${FILES}" | sed 's/^/- NEW: /')
-    CHG+="\n"
-
-else
-    if [ "${#TARGET[@]}" -gt 0 ]
-    then
-        PREV_SHA=$(
-            cat "${PREV_SHA}" \
-            | grep \
-              --line-regex \
-              -f <(printf '[^[:space:]][^[:space:]]*[[:space:]][[:space:]]*%s\n' "${TARGET[@]}")
-        )
+        echo 0000
     else
-        PREV_SHA=$(cat "${PREV_SHA}")
+        echo "${TF}" \
+            | sed 's/^bkp-\([[:digit:]][[:digit:]]*\)\.tar$/\1/' \
+            | awk 'BEGIN {i=1} {if ($0 > i) {i=$0}} END {printf("%04d\n", i + 1)}'
     fi
+}
 
-    BKPDIFF="$((diff <(echo "${PREV_SHA}") <(echo "${CHK}") || :) | prj-private-diff.sh)"
+get_best_archive() {
+    BACKUPDIR="$1"
+    MAX_SIZE="$2"
+    FILE_SIZE="$3"
 
-    if [ "${ALL}" == "True" ]
+    TF=$(find "${BACKUPDIR}" \
+        -name "*.tar" \
+        -printf '%f\t%s\n')
+
+    if [ -z "${TF:-}" ]
     then
-        FILES="$(echo "${CHK}" | cut -d' ' -f 3-)"
+        echo "${BACKUPDIR}/bkp-0000.tar"
     else
-        FILES="$(echo "${BKPDIFF}" | ( grep -v "^DELETED" || : ) | cut -d'	' -f 2-)"
-    fi
+        NEXT=$(echo "${TF}" | awk -v MAX="${MAX_SIZE}" -v FS="${FILE_SIZE}" -F"\t" '
+            BEGIN { best="new"; best_size="" }
+            (FS + $2) <= MAX { s=FS + $2; if (s > best_size) {best=$1; best_size=s} }
+            END {print best}
+        ')
 
-    if [ "${#TARGET[@]}" -gt 0 ]
-    then
-        FILES=$(intersection <(echo "${FILES}") <(printf '%s\n' "${TARGET[@]}"))
-    fi
-
-    if [ -z "${FILES:-}" ]
-    then
-        echo "No changes to be saved!"
-        exit 0
-    fi
-
-    CHG+="\n\n## ${DATE}\n"
-
-    if [ ! -z "${BKPDIFF}" ]
-    then
-        CHG+="\nModified files:\n"
-        CHG+=$(echo "${BKPDIFF}" | sed 's/^/- /' | sed 's/\t/: /')
-        CHG+="\n"
-    fi
-
-    if [ "${ALL}" == "True" ]
-    then
-        COPIED=$(difference <(echo "${FILES:-}") <(echo "${BKPDIFF}" | cut -f2))
-
-        if [ ! -z "${COPIED}" ]
+        if [ "${NEXT}" == "new" ]
         then
-            CHG+="\nCopying unmodified files as --all option was given\n"
-            CHG+="\nCopied files:\n"
-            CHG+=$(echo "${COPIED}" | sed 's/^/- /')
-            CHG+="\n"
+            NUM=$(find_next_number "${BACKUPDIR}")
+            NEXT="bkp-${NUM}.tar"
         fi
+        echo "${BACKUPDIR}/${NEXT}"
     fi
+}
+
+TARGET_FILES=$(prj-find --base "${BASE}" <(echo "${CHK}") "${TARGET[@]}")
+UNBACKEDUP_FILES=$(echo "${TARGET_FILES}" | awk -v CHG="${CHANGELOG_BNAME}" '($1 == "MISSING") && ($3 != CHG)' )
+
+if [ -z "${TARGET_FILES:-}" ]
+then
+    echo "ERROR: No changes since last backup! Exiting without doing anything" >&2
+    exit 1
+fi
+
+if [ -f "${CHANGELOG}" ]
+then
+    CHG="\n\n"
+else
+    CHG=""
+fi
+
+CHG+="## BACKUP: ${DATE}\n"
+echo -e "## SAVE: Creating new backup ${DATE}\n"
+
+if [ -z "${UNBACKEDUP_FILES}" ]
+then
+    S="NOTE: there are no new files to add, so this will just save the changelog and a snapshot file."
+    echo "${S}"
+    CHG+="\n${S}\n"
 fi
 
 if [ ! -z "${MESSAGE:-}" ]
@@ -156,15 +191,58 @@ then
     CHG+="\n${MESSAGE}"
 fi
 
-CHGLOG_ORIG=$(cat "${CHANGELOG}")
-cleanup_err() {
-    # Remove any updates if it failed
-    echo "${CHGLOG_ORIG}" > "${CHANGELOG}"
-    rm -f '${TARBALL}' '${TARBALL}.sha256' '${SHAFILE}'
-    exit 1
+write_to_tar() {
+    BACKUPDIR="$1"
+    SHA="$2"
+    FN="$3"
+    FN_SIZE="$4"
+    SHOULDCOMPRESS="${5:-True}"
+
+    TAR=$(get_best_archive "${BACKUPDIR}" "${MAX_TAR_SIZE}" "${FN_SIZE}")
+    MANIFEST="${TAR%.tar}.MANIFEST"
+
+    if [ -f "${TAR}" ]
+    then
+        MODE="--append"
+    else
+        MODE="--create"
+    fi
+
+    if (already_compressed "${FN}") || [ "${SHOULDCOMPRESS}" == "False" ]
+    then
+        OFN="${SHA}"
+        echo "Adding '${FN}' to '${TAR}'"
+        tar --transform "s#${FN}#${OFN}#" ${MODE} --file "${TAR}" "${FN}"
+        echo -e "$(basename "${TAR}")\t${SHA}\tuncompressed" >> "${MANIFEST}"
+    else
+        OFN="${SHA}.${COMP_EXT}"
+        echo "Compressing '${FN}'"
+        cleanup(){ EC="$?"; rm -f "${TMPDIR:-${BASE}}/${OFN}"; exit "${EC}"; }
+        trap cleanup ERR
+        ${COMP_COMMAND} "${FN}" > "${TMPDIR:-${BASE}}/${OFN}"
+        echo "Adding '${FN}' to '${TAR}'"
+        cd "${TMPDIR:-${BASE}}"
+        tar ${MODE} --file "${TAR}" "${OFN}"
+        rm -f "${TMPDIR:-${BASE}}/${OFN}"
+        cd "${BASE}"
+        echo -e "$(basename "${TAR}")\t${SHA}\t${COMP_EXT}" >> "${MANIFEST}"
+    fi
+    CHG+="\n- Copied '${FN}' as '${OFN}' to '${TAR}'"
 }
 
-trap cleanup_err ERR
+if [ ! -z "${UNBACKEDUP_FILES}" ]
+then
+    CHG+="\nAdding new files:"
+
+    while read -u 4 LINE
+    do
+        SHA=$(echo "${LINE}" | cut -d'	' -f 2)
+        FN=$(echo "${LINE}" | cut -d'	' -f 3)
+        FN_SIZE=$(find $(dirname "${FN}") -name $(basename "${FN}") -printf "%s\n")
+        write_to_tar "${BKPDIR}" "${SHA}" "${FN}" "${FN_SIZE}"
+    done 4<<< "${UNBACKEDUP_FILES}"
+fi
+
 
 if [ ! -z "${NOTES}" ]
 then
@@ -172,25 +250,52 @@ then
     CHG+="\n${NOTES}"
 fi
 
+if [ -e "${CHANGELOG}" ]
+then
+    CHGLOG_ORIG=$(cat "${CHANGELOG}")
+else
+    CHGLOG_ORIG=""
+fi
+
+if [ -e "${NOTEFILE}" ]
+then
+    NOTEFILE_ORIG=$(cat "${NOTEFILE}")
+else
+    NOTEFILE_ORIG=""
+fi
+
+cleanup_err() {
+    EC="$?"
+    # Remove any updates if it failed
+    [ ! -z "${CHGLOG_ORIG}" ] && (echo "${CHGLOG_ORIG}" > "${CHANGELOG}")
+    [ ! -z "${NOTEFILE_ORIG:-}" ] && (echo "${NOTEFILE_ORIG}" > "${NOTEFILE}")
+    rm -f "${SHAFILE}"
+    exit "${EC}"
+}
+
+trap cleanup_err ERR
 echo -e "${CHG}" >> "${CHANGELOG}"
+rm -f "${NOTEFILE}"
 
 # Update the SHASUM for the changelog file
 CHGLOG_BNAME=$(echo "${CHANGELOG}" | awk -v DIR="${BASE}" '{print substr($0, length(DIR) + 2)}')
-CHGLOG_SHA=$(prj-sha --base "${BASE}" --dir "${BASE}" "${CHGLOG_BNAME}")
-echo "${CHK}" | sed "s#^.*${CHGLOG_BNAME}\$#${CHGLOG_SHA}#" > "${SHAFILE}"
+CHGLOG_SHA=$(prj-sha --base "${BASE}" "${CHGLOG_BNAME}" | cut -d' ' -f 1)
+TARGET_FILES=$(prj-find --base "${BASE}" <(echo -e "${CHGLOG_SHA}  ${CHGLOG_BNAME}"))
+UNBACKEDUP_FILES=$(echo "${TARGET_FILES}" | awk '$1 == "MISSING"')
 
-# The updated changelog should be in the backup
-# If CHGLOG_SHA is not empty, then it's not in prjignore
-if [ ! -z "${CHGLOG_SHA:-}" ]
+if [ ! -z "${UNBACKEDUP_FILES}" ]
 then
-    FILES+="\n$(basename "${CHANGELOG}")"
+    CHGLOG_SIZE=$(find $(dirname "${CHGLOG_BNAME}") -name $(basename "${CHGLOG_BNAME}") -printf "%s\n")
+    write_to_tar "${BKPDIR}" "${CHGLOG_SHA}" "${CHGLOG_BNAME}" "${CHGLOG_SIZE}" "False"
 fi
 
-echo "Creating backup with files:"
-# grep and sort removes empty lines and duplicates
-tar --create --gzip -vv --file "${TARBALL}" --files-from=<(echo -e "${FILES}" | (grep -v '^$' || :) | sort -u)
-sha256sum "${TARBALL}" > "${TARBALL}.sha256"
+echo "${CHK}" | (grep -v "${CHGLOG_BNAME}\$" || : ; echo "${CHGLOG_SHA}  ${CHGLOG_BNAME}") > "${SHAFILE}"
 
-rm -f "${NOTEFILE}"
+cd $(dirname "${SHAFILE}")
+
+SHAFILE_BNAME=$(basename "${SHAFILE}")
+SHAFILE_SIZE=$(find . -name "${SHAFILE_BNAME}" -printf "%s\n")
+write_to_tar "${BKPDIR}" "${SHAFILE_BNAME}" "${SHAFILE_BNAME}" "${SHAFILE_SIZE}" "False"
+
 
 sed -i "/^HEAD/s/^.*\$/HEAD=${DATE}/" "${BASE}/.prj"
