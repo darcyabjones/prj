@@ -33,7 +33,7 @@ DATE=$(date '+%Y%m%d-%H%M%S')
 
 get_state() {
     DIR="$1"
-    FILES=$(find "${DIR}" -type f,l -printf '%h/%f\t%C+-%s\n')
+    FILES=$(find "${DIR}" \( -type f -o -type l \)  -printf '%h/%f\t%C+-%s\n')
     echo "${FILES}" \
         | sort \
         | awk -F'\t' -v DIR="${BASE}" '{printf("%s  %s\n", $2, substr($1, length(DIR) + 2))}'

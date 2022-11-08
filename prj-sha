@@ -39,7 +39,7 @@ else
 fi
 
 
-FILES=$(find "${BASE}" -type f,l | awk -v DIR="${BASE}" '{print substr($0, length(DIR) + 2)}')
+FILES=$(find "${BASE}" \( -type f -o -type l \) | awk -v DIR="${BASE}" '{print substr($0, length(DIR) + 2)}')
 
 if [ ! -z "${BKPIGNORE:-}" ] && [ ! -z "${FILES:-}" ]
 then

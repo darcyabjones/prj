@@ -2,7 +2,7 @@
 
 # vi: ft=bash
 
-set -euo pipefail
+set -xeuo pipefail
 
 CMD=$(prj-private-cli.py "$(basename $0)" "$@" <<EOF
 short="-b", long="--base", dest="BASE", type="str", default="", help="Which base directory to use"
@@ -67,7 +67,7 @@ fi
 
 
 DATE=$(date '+%Y%m%d-%H%M%S')
-MAX_TAR_SIZE=$(( "${MAXSIZE:-4}" * 1000000000 ))
+MAX_TAR_SIZE=$(( ${MAXSIZE:-4} * 1000000000 ))
 SHAFILE="${BKPDIR}/${DATE}.sha256"
 CHANGELOG_BNAME="${CHANGELOG_:-${CHANGELOG:-CHANGELOG.txt}}"
 CHANGELOG="${BASE}/${CHANGELOG_BNAME}"
@@ -91,7 +91,8 @@ else
 fi
 
 [ "${ALL}" == "True" ] && ALL_FLAG="--all" || ALL_FLAG=""
-CHK=$(prj-sha ${ALL_FLAG} --cpus "${CPUS}" --base "${BASE}" "${TARGET[@]}")
+
+CHK=$(prj-sha ${ALL_FLAG} --cpus "${CPUS}" --base "${BASE}" ${TARGET[@]+"${TARGET[@]}"})
 
 if [ -z "${CHK:-}" ]
 then
@@ -160,7 +161,7 @@ get_best_archive() {
     fi
 }
 
-TARGET_FILES=$(prj-find --base "${BASE}" <(echo "${CHK}") "${TARGET[@]}")
+TARGET_FILES=$(prj-find --base "${BASE}" <(echo "${CHK}") ${TARGET[@]+"${TARGET[@]}"})
 UNBACKEDUP_FILES=$(echo "${TARGET_FILES}" | awk -v CHG="${CHANGELOG_BNAME}" '($1 == "MISSING") && ($3 != CHG)' | (grep -v '^[[:space:]]*$' || :))
 
 if [ -z "${TARGET_FILES:-}" ]
